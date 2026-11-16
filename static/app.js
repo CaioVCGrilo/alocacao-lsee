@@ -29,9 +29,38 @@ function renderLocationSelect(name, currentValue) {
   `;
 }
 
+const ADMIN_TAB_LABELS = {
+  dashboard: "Dashboard",
+  computadores: "Computadores",
+  mapa: "Mapa do LSEE",
+  simulador: "Simulador",
+  criterios: "Critérios",
+  pessoas: "Pessoas",
+  alocacoes: "Alocações",
+  monitores: "Monitores",
+  etiquetas: "Etiquetas",
+  rede: "Rede",
+  solicitacoes: "Solicitações",
+  parametros: "Parâmetros & Log",
+};
+
 const state = {
   isAdmin: false,
+  needsBootstrap: false,
+  currentUser: null,
   activeTab: "dashboard",
+  collab: {
+    online_admins: [],
+    other_online_count: 0,
+    messages: [],
+    latest_message_id: 0,
+    lastSeenMessageId: 0,
+    initialized: false,
+    unread: 0,
+    chatOpen: false,
+    timer: null,
+    pollingBusy: false,
+  },
   simPc: "",
   compFilters: { search: "", status: "", tipo: "", pendencia: "" },
   peopleFilters: { search: "", situacao: "" },
@@ -289,7 +318,10 @@ async function apiFetch(url, options = {}) {
   const resp = await fetch(url, opts);
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    throw new Error(data.error || `Erro HTTP ${resp.status}`);
+    const err = new Error(data.error || `Erro HTTP ${resp.status}`);
+    err.status = resp.status;
+    err.data = data;
+    throw err;
   }
   return data;
 }
@@ -503,6 +535,224 @@ async function openReleaseTutorialModal() {
   }
 }
 
+function fmtTimeLocalShort(iso) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return "";
+  }
+}
+
+function renderCollabUI() {
+  const pill = document.getElementById("admin-presence-pill");
+  const banner = document.getElementById("collab-warning-banner");
+  const widget = document.getElementById("admin-chat-widget");
+  const panel = document.getElementById("admin-chat-panel");
+  const onlineCountEl = document.getElementById("admin-chat-online-count");
+  const toggleMetaEl = document.getElementById("admin-chat-toggle-meta");
+  const unreadEl = document.getElementById("admin-chat-unread");
+  const onlineListEl = document.getElementById("admin-chat-online-list");
+  const msgsEl = document.getElementById("admin-chat-messages");
+
+  if (!state.isAdmin) {
+    pill?.classList.add("hidden");
+    banner?.classList.add("hidden");
+    widget?.classList.add("hidden");
+    panel?.classList.add("hidden");
+    return;
+  }
+
+  widget?.classList.remove("hidden");
+  panel?.classList.toggle("hidden", !state.collab.chatOpen);
+
+  const online = state.collab.online_admins || [];
+  const others = online.filter((a) => !a.is_self);
+
+  if (pill) {
+    pill.classList.remove("hidden");
+    pill.classList.toggle("has-others", others.length > 0);
+    if (others.length > 0) {
+      const names = others.map((a) => `${a.nome} (${ADMIN_TAB_LABELS[a.active_tab] || a.active_tab})`).join(", ");
+      pill.innerHTML = `<span class="presence-dot"></span><span>⚠ Outro ADM online: ${esc(names)}</span>`;
+    } else {
+      pill.innerHTML = `<span class="presence-dot"></span><span>Somente você conectado</span>`;
+    }
+  }
+
+  if (banner) {
+    if (others.length > 0) {
+      const summary = others
+        .map((a) => `<strong>${esc(a.nome)}</strong>${a.numero_usp ? ` (NUSP ${esc(a.numero_usp)})` : ""} na aba <strong>${esc(ADMIN_TAB_LABELS[a.active_tab] || a.active_tab)}</strong>`)
+        .join("; ");
+      banner.classList.remove("hidden");
+      banner.innerHTML = `
+        <span>⚠ Atenção — outro administrador está ativo no momento: ${summary}. Combine pelo chat à direita antes de salvar alterações.</span>
+        <button class="btn btn-sm btn-secondary js-open-collab-chat" type="button">Abrir chat</button>
+      `;
+      banner.querySelector(".js-open-collab-chat")?.addEventListener("click", () => toggleAdminChat(true));
+    } else {
+      banner.classList.add("hidden");
+      banner.innerHTML = "";
+    }
+  }
+
+  if (onlineCountEl) {
+    onlineCountEl.textContent = `${online.length} ${online.length === 1 ? "online" : "online"}`;
+  }
+  if (toggleMetaEl) {
+    toggleMetaEl.textContent = others.length > 0 ? `· ${others.length} outro(s)` : "";
+  }
+  if (unreadEl) {
+    const showUnread = !state.collab.chatOpen && state.collab.unread > 0;
+    unreadEl.classList.toggle("hidden", !showUnread);
+    unreadEl.textContent = String(state.collab.unread);
+  }
+  if (onlineListEl) {
+    onlineListEl.innerHTML = online.length
+      ? online.map((a) => {
+          const tabLbl = ADMIN_TAB_LABELS[a.active_tab] || a.active_tab || "Dashboard";
+          return `<span class="admin-chat-online-chip"><span class="presence-dot"></span><strong>${esc(a.nome)}${a.is_self ? " (você)" : ""}</strong> · ${esc(tabLbl)}</span>`;
+        }).join("")
+      : '<span class="muted" style="font-size:0.75rem;">Sem sessões ativas registradas.</span>';
+  }
+  if (msgsEl) {
+    const msgs = state.collab.messages || [];
+    const wasAtBottom = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 48;
+    msgsEl.innerHTML = msgs.length
+      ? msgs.map((m) => `
+          <div class="chat-bubble ${m.is_self ? "is-self" : ""}">
+            <div class="chat-bubble-meta">
+              <strong>${esc(m.author_name || "ADM")}</strong>
+              <span>${esc(fmtTimeLocalShort(m.created_at))}</span>
+            </div>
+            <div class="chat-bubble-text">${esc(m.message)}</div>
+          </div>
+        `).join("")
+      : '<p class="muted" style="font-size:0.8rem;text-align:center;margin:20px 0;">Nenhuma mensagem ainda. Use este espaço para avisar quando for mexer no sistema.</p>';
+    if (state.collab.chatOpen && (wasAtBottom || !state.collab.initialized)) {
+      msgsEl.scrollTop = msgsEl.scrollHeight;
+    }
+  }
+}
+
+function applyCollabData(data) {
+  const col = state.collab;
+  const msgs = data.messages || [];
+  const latestId = Number(data.latest_message_id || (msgs.length ? msgs[msgs.length - 1].id : 0));
+  if (!col.initialized) {
+    col.lastSeenMessageId = latestId;
+    col.unread = 0;
+    col.initialized = true;
+  } else if (col.chatOpen) {
+    col.lastSeenMessageId = latestId;
+    col.unread = 0;
+  } else {
+    const newFromOthers = msgs.filter((m) => Number(m.id) > col.lastSeenMessageId && !m.is_self);
+    if (newFromOthers.length > 0) {
+      col.unread += newFromOthers.length;
+    }
+    col.lastSeenMessageId = Math.max(col.lastSeenMessageId, latestId);
+  }
+  col.online_admins = data.online_admins || [];
+  col.other_online_count = Number(data.other_online_count || 0);
+  col.messages = msgs;
+  col.latest_message_id = latestId;
+  renderCollabUI();
+}
+
+async function pollCollab(sendHeartbeat = true) {
+  if (!state.isAdmin || state.collab.pollingBusy) return;
+  state.collab.pollingBusy = true;
+  try {
+    const data = sendHeartbeat
+      ? await apiFetch("/api/admin/collab/heartbeat", {
+          method: "POST",
+          body: JSON.stringify({ active_tab: state.activeTab }),
+        })
+      : await apiFetch(`/api/admin/collab?tab=${encodeURIComponent(state.activeTab)}`);
+    applyCollabData(data);
+  } catch (err) {
+    if (err && err.status === 401) {
+      stopCollabPolling();
+      state.isAdmin = false;
+      state.currentUser = null;
+      updateAuthUI();
+      showToast(err.message || "Sessão administrativa encerrada.", true);
+      loadActiveTab();
+    }
+  } finally {
+    state.collab.pollingBusy = false;
+  }
+}
+
+function scheduleNextCollabPoll() {
+  if (state.collab.timer && typeof clearTimeout === "function") {
+    clearTimeout(state.collab.timer);
+    state.collab.timer = null;
+  }
+  if (!state.isAdmin || typeof setTimeout !== "function") return;
+  const delay = state.collab.chatOpen ? 6000 : 12000;
+  state.collab.timer = setTimeout(async () => {
+    await pollCollab(true);
+    scheduleNextCollabPoll();
+  }, delay);
+}
+
+function startCollabPolling() {
+  stopCollabPolling();
+  if (!state.isAdmin) return;
+  pollCollab(true).then(() => scheduleNextCollabPoll());
+}
+
+function stopCollabPolling() {
+  if (state.collab.timer && typeof clearTimeout === "function") {
+    clearTimeout(state.collab.timer);
+    state.collab.timer = null;
+  }
+  state.collab.online_admins = [];
+  state.collab.other_online_count = 0;
+  state.collab.messages = [];
+  state.collab.latest_message_id = 0;
+  state.collab.lastSeenMessageId = 0;
+  state.collab.initialized = false;
+  state.collab.unread = 0;
+  state.collab.chatOpen = false;
+  renderCollabUI();
+}
+
+function toggleAdminChat(forceOpen = null) {
+  if (!state.isAdmin) return;
+  const next = forceOpen === null ? !state.collab.chatOpen : Boolean(forceOpen);
+  state.collab.chatOpen = next;
+  if (next) {
+    state.collab.unread = 0;
+    state.collab.lastSeenMessageId = Math.max(state.collab.lastSeenMessageId, state.collab.latest_message_id);
+  }
+  renderCollabUI();
+  scheduleNextCollabPoll();
+  if (next) {
+    pollCollab(true);
+    setTimeout(() => document.getElementById("admin-chat-input")?.focus(), 40);
+  }
+}
+
+async function sendAdminChatMessage(rawText) {
+  const msg = String(rawText || "").trim();
+  if (!msg || !state.isAdmin) return;
+  const data = await apiFetch("/api/admin/collab/chat", {
+    method: "POST",
+    body: JSON.stringify({ message: msg, active_tab: state.activeTab }),
+  });
+  state.collab.unread = 0;
+  applyCollabData(data);
+  state.collab.lastSeenMessageId = state.collab.latest_message_id;
+  const msgsEl = document.getElementById("admin-chat-messages");
+  if (msgsEl) msgsEl.scrollTop = msgsEl.scrollHeight;
+}
+
 function updateAuthUI() {
   const badge = document.getElementById("mode-badge");
   const btnLogin = document.getElementById("btn-admin-login");
@@ -513,13 +763,17 @@ function updateAuthUI() {
   });
 
   if (state.isAdmin) {
-    badge.textContent = "Modo Administrador";
+    const label = state.currentUser?.nome ? `Admin · ${state.currentUser.nome}` : "Modo Administrador";
+    badge.textContent = label;
+    badge.title = state.currentUser?.numero_usp ? `NUSP ${state.currentUser.numero_usp}` : "";
     badge.className = "badge badge-admin";
     btnLogin.classList.add("hidden");
     btnLogout.classList.remove("hidden");
     btnHelp.classList.remove("hidden");
+    renderCollabUI();
   } else {
     badge.textContent = "Visão Pública";
+    badge.title = "";
     badge.className = "badge badge-public";
     btnLogin.classList.remove("hidden");
     btnLogout.classList.add("hidden");
@@ -529,10 +783,11 @@ function updateAuthUI() {
     if (!["", "Livre", "Em uso"].includes(state.compFilters.status)) {
       state.compFilters.status = "";
     }
-    const adminTabs = ["criterios", "pessoas", "alocacoes", "monitores", "etiquetas", "rede", "parametros"];
+    const adminTabs = ["criterios", "pessoas", "alocacoes", "monitores", "etiquetas", "rede", "solicitacoes", "parametros"];
     if (adminTabs.includes(state.activeTab)) {
       switchTab("dashboard");
     }
+    renderCollabUI();
   }
 }
 
@@ -546,6 +801,9 @@ function switchTab(tabName) {
   document.querySelectorAll(".tab-panel").forEach((panel) => {
     panel.classList.toggle("active", panel.id === `tab-${tabName}`);
   });
+  if (state.isAdmin) {
+    pollCollab(true);
+  }
   loadActiveTab();
 }
 
@@ -1415,6 +1673,7 @@ async function renderDashboard() {
 
   const dashLogsCols = {
     timestamp: { type: "text" },
+    actor: { type: "text" },
     action: { type: "text" },
     target: { type: "natural" },
     details: { type: "text" },
@@ -1483,6 +1742,7 @@ async function renderDashboard() {
             <thead>
               <tr>
                 ${sortableTh("dash_logs", "timestamp", "Data/Hora (UTC)")}
+                ${sortableTh("dash_logs", "actor", "Autor")}
                 ${sortableTh("dash_logs", "action", "Ação")}
                 ${sortableTh("dash_logs", "target", "Alvo")}
                 ${sortableTh("dash_logs", "details", "Detalhes")}
@@ -1492,11 +1752,12 @@ async function renderDashboard() {
               ${recentLogs.map((l) => `
                 <tr>
                   <td class="mono">${esc(l.timestamp.slice(0, 19).replace("T", " "))}</td>
+                  <td>${esc(l.actor || "—")}</td>
                   <td><span class="badge badge-muted">${esc(l.action)}</span></td>
                   <td class="mono">${esc(l.target)}</td>
                   <td>${esc(l.details)}</td>
                 </tr>
-              `).join("") || '<tr><td colspan="4" class="muted">Sem registros ainda.</td></tr>'}
+              `).join("") || '<tr><td colspan="5" class="muted">Sem registros ainda.</td></tr>'}
             </tbody>
           </table>
         </div>
@@ -4545,9 +4806,66 @@ function openNetworkModal(item) {
 /* ==================== PARÂMETROS & LOG (ADMIN) ==================== */
 async function renderParamsAndAudit() {
   const el = document.getElementById("tab-parametros");
-  const [pData, aData] = await Promise.all([apiFetch("/api/admin/params"), apiFetch("/api/admin/audit")]);
+  const [pData, aData, uData] = await Promise.all([
+    apiFetch("/api/admin/params"),
+    apiFetch("/api/admin/audit"),
+    apiFetch("/api/admin/users"),
+  ]);
+  const admins = uData.items || [];
 
   el.innerHTML = `
+    <div class="card">
+      <div class="card-header"><h2 class="card-title">Administradores Autorizados (Login por Número USP)</h2></div>
+      <div class="card-body">
+        <p class="muted" style="margin-top:0;font-size:0.84rem;">
+          Todos os administradores usam a mesma senha administrativa, porém o login só é liberado para os <strong>Números USP</strong> cadastrados e ativos abaixo.
+        </p>
+        <form id="form-add-admin-user" class="admin-inline-form">
+          <div class="form-field" style="min-width:160px;">
+            <label for="new-adm-nusp">Número USP</label>
+            <input id="new-adm-nusp" class="input mono" name="numero_usp" placeholder="Ex.: 1234567" inputmode="numeric" required />
+          </div>
+          <div class="form-field" style="flex:1;min-width:210px;">
+            <label for="new-adm-nome">Nome completo / exibição</label>
+            <input id="new-adm-nome" class="input" name="nome" placeholder="Ex.: Cleiton Sudré" required />
+          </div>
+          <button class="btn btn-primary" type="submit">+ Cadastrar ADM</button>
+        </form>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Número USP</th>
+                <th>Nome</th>
+                <th>Status</th>
+                <th>Cadastrado por</th>
+                <th>Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${admins.map((u) => {
+                const isSelf = state.currentUser && Number(state.currentUser.id) === Number(u.id);
+                return `
+                  <tr>
+                    <td class="mono">${esc(u.numero_usp)}</td>
+                    <td><strong>${esc(u.nome)}</strong> ${isSelf ? '<span class="badge badge-public">Você</span>' : ""}</td>
+                    <td><span class="badge ${u.is_active ? "badge-livre" : "badge-danger"}">${u.is_active ? "Ativo" : "Inativo"}</span></td>
+                    <td>${esc(u.created_by || "—")}</td>
+                    <td>
+                      <span class="row-actions">
+                        <button class="btn btn-sm btn-secondary js-toggle-adm" data-id="${u.id}" data-active="${u.is_active ? "1" : "0"}" type="button">${u.is_active ? "Desativar" : "Ativar"}</button>
+                        <button class="btn btn-sm btn-danger js-del-adm" data-id="${u.id}" type="button" ${isSelf ? "disabled" : ""}>Excluir</button>
+                      </span>
+                    </td>
+                  </tr>
+                `;
+              }).join("") || '<tr><td colspan="5" class="muted">Nenhum administrador cadastrado ainda.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header"><h2 class="card-title">Parâmetros do Sistema e Privacidade</h2></div>
       <div class="card-body">
@@ -4585,6 +4903,7 @@ async function renderParamsAndAudit() {
           <thead>
             <tr>
               ${sortableTh("audit_logs", "timestamp", "Data/Hora (UTC)")}
+              ${sortableTh("audit_logs", "actor", "Autor")}
               ${sortableTh("audit_logs", "action", "Ação")}
               ${sortableTh("audit_logs", "target", "Alvo")}
               ${sortableTh("audit_logs", "details", "Detalhes")}
@@ -4593,12 +4912,14 @@ async function renderParamsAndAudit() {
           <tbody>
             ${applyTableSort("audit_logs", aData.items, {
               timestamp: { type: "text" },
+              actor: { type: "text" },
               action: { type: "text" },
               target: { type: "natural" },
               details: { type: "text" },
             }).map((l) => `
               <tr>
                 <td class="mono">${esc(l.timestamp.slice(0, 19).replace("T", " "))}</td>
+                <td>${esc(l.actor || "—")}</td>
                 <td><span class="badge badge-muted">${esc(l.action)}</span></td>
                 <td class="mono">${esc(l.target)}</td>
                 <td>${esc(l.details)}</td>
@@ -4609,6 +4930,48 @@ async function renderParamsAndAudit() {
       </div>
     </div>
   `;
+
+  document.getElementById("form-add-admin-user").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const payload = Object.fromEntries(new FormData(e.target).entries());
+    try {
+      await apiFetch("/api/admin/users", { method: "POST", body: JSON.stringify(payload) });
+      showToast("Administrador cadastrado!");
+      renderParamsAndAudit();
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  });
+
+  el.querySelectorAll(".js-toggle-adm").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const uid = Number(btn.dataset.id);
+      const nextActive = btn.dataset.active !== "1";
+      try {
+        await apiFetch(`/api/admin/users/${uid}`, {
+          method: "PUT",
+          body: JSON.stringify({ is_active: nextActive }),
+        });
+        showToast(nextActive ? "Administrador reativado!" : "Administrador desativado!");
+        renderParamsAndAudit();
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  });
+
+  el.querySelectorAll(".js-del-adm").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("Remover este administrador da lista de acesso?")) return;
+      try {
+        await apiFetch(`/api/admin/users/${btn.dataset.id}`, { method: "DELETE" });
+        showToast("Administrador removido.");
+        renderParamsAndAudit();
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  });
 
   document.getElementById("form-params").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -4714,7 +5077,8 @@ function openAdminHelpModal() {
       tab: "parametros",
       title: "12. Parâmetros & Log",
       items: [
-        "Ajusta pesos do score, ganho mínimo, anonimização pública e exibe o histórico de auditoria (as Regras de Uso são editadas direto no botão \"Regras de Uso\" no topo)."
+        "Cadastre os Números USP autorizados no Modo Admin, ajuste pesos do score e acompanhe a auditoria identificando quem fez cada ação.",
+        "Use o indicador no topo e o mini chat à direita para coordenar alterações quando outro administrador estiver logado."
       ]
     }
   ];
@@ -4756,13 +5120,33 @@ function openAdminHelpModal() {
 }
 
 /* ==================== AUTH & INICIALIZAÇÃO ==================== */
-function openLoginModal() {
+async function openLoginModal() {
+  try {
+    const st = await apiFetch("/api/auth/status");
+    state.needsBootstrap = Boolean(st.needs_bootstrap);
+  } catch {
+    // mantém último valor conhecido
+  }
+
   openModal("Autenticação do Administrador", `
-    <p class="muted" style="margin-top:0;">Digite a senha administrativa para liberar detalhes críticos, rede e edição.</p>
+    <p class="muted" style="margin-top:0;">
+      ${state.needsBootstrap
+        ? "Primeiro acesso: informe seu Número USP, Nome e a senha administrativa para cadastrar o 1º administrador autorizado."
+        : "Informe o Número USP cadastrado como administrador e a senha administrativa."}
+    </p>
     <form id="form-login">
       <div class="form-field">
-        <label>Senha do Administrador</label>
-        <input class="input" type="password" name="password" id="login-password" required autofocus />
+        <label for="login-nusp">Número USP</label>
+        <input class="input mono" type="text" name="numero_usp" id="login-nusp" placeholder="Ex.: 1234567" inputmode="numeric" required autofocus />
+      </div>
+      ${state.needsBootstrap ? `
+      <div class="form-field" style="margin-top:10px;">
+        <label for="login-nome">Nome completo / exibição</label>
+        <input class="input" type="text" name="nome" id="login-nome" placeholder="Ex.: Cleiton Sudré" required />
+      </div>` : ""}
+      <div class="form-field" style="margin-top:10px;">
+        <label for="login-password">Senha do Administrador</label>
+        <input class="input" type="password" name="password" id="login-password" required />
       </div>
       <div class="form-actions">
         <button class="btn btn-secondary" type="button" onclick="closeModal()">Cancelar</button>
@@ -4770,18 +5154,31 @@ function openLoginModal() {
       </div>
     </form>
   `);
-  setTimeout(() => document.getElementById("login-password")?.focus(), 40);
+  setTimeout(() => document.getElementById("login-nusp")?.focus(), 40);
   document.getElementById("form-login").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const pw = new FormData(e.target).get("password");
+    const fd = new FormData(e.target);
+    const payload = {
+      numero_usp: fd.get("numero_usp") || "",
+      nome: fd.get("nome") || "",
+      password: fd.get("password") || "",
+      active_tab: state.activeTab,
+    };
     try {
-      const res = await apiFetch("/api/auth/login", { method: "POST", body: JSON.stringify({ password: pw }) });
+      const res = await apiFetch("/api/auth/login", { method: "POST", body: JSON.stringify(payload) });
       state.isAdmin = Boolean(res.is_admin);
+      state.needsBootstrap = false;
+      state.currentUser = res.user || null;
       closeModal();
       updateAuthUI();
-      showToast("Modo Administrador ativado.");
+      startCollabPolling();
+      showToast(state.currentUser?.nome ? `Bem-vindo(a), ${state.currentUser.nome}!` : "Modo Administrador ativado.");
       loadActiveTab();
     } catch (err) {
+      if (err?.data?.code === "BOOTSTRAP_NAME_REQUIRED") {
+        state.needsBootstrap = true;
+        openLoginModal();
+      }
       showToast(err.message, true);
     }
   });
@@ -4903,9 +5300,26 @@ async function init() {
   document.getElementById("btn-usage-rules")?.addEventListener("click", openUsageRulesModal);
   document.getElementById("btn-admin-login").addEventListener("click", openLoginModal);
   document.getElementById("btn-admin-help").addEventListener("click", openAdminHelpModal);
+  document.getElementById("admin-presence-pill")?.addEventListener("click", () => toggleAdminChat(true));
+  document.getElementById("btn-chat-toggle")?.addEventListener("click", () => toggleAdminChat());
+  document.getElementById("btn-chat-close")?.addEventListener("click", () => toggleAdminChat(false));
+  document.getElementById("admin-chat-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const inp = document.getElementById("admin-chat-input");
+    const txt = (inp?.value || "").trim();
+    if (!txt) return;
+    try {
+      await sendAdminChatMessage(txt);
+      if (inp) inp.value = "";
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  });
   document.getElementById("btn-admin-logout").addEventListener("click", async () => {
     await apiFetch("/api/auth/logout", { method: "POST" });
+    stopCollabPolling();
     state.isAdmin = false;
+    state.currentUser = null;
     updateAuthUI();
     showToast("Sessão administrativa encerrada.");
     loadActiveTab();
@@ -4914,10 +5328,16 @@ async function init() {
   try {
     const auth = await apiFetch("/api/auth/status");
     state.isAdmin = Boolean(auth.is_admin);
+    state.needsBootstrap = Boolean(auth.needs_bootstrap);
+    state.currentUser = auth.user || null;
   } catch {
     state.isAdmin = false;
+    state.currentUser = null;
   }
   updateAuthUI();
+  if (state.isAdmin) {
+    startCollabPolling();
+  }
   await loadActiveTab();
 }
 

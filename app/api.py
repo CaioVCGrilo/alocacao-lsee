@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import json
 import mimetypes
+import secrets
 import webbrowser
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -15,9 +17,12 @@ from urllib.parse import parse_qs, unquote, urlparse
 from flask import Flask, Response, request
 
 from .auth import (
+    authenticate_admin_user,
     create_session_token,
     extract_session_from_headers,
     is_secure_cookie_env,
+    normalize_nusp,
+    parse_session_token,
     verify_admin_login,
     verify_session_token,
 )
@@ -52,11 +57,349 @@ def _public_person_label(nome: str, id_pessoa: str, anonymize: bool) -> str:
     return " ".join(parts) if parts else "Membro"
 
 
-def _log_audit(conn: Any, action: str, target: str = "", details: str = "") -> None:
+_CURRENT_ADMIN_ACTOR: contextvars.ContextVar[str] = contextvars.ContextVar("_CURRENT_ADMIN_ACTOR", default="")
+ONLINE_SESSION_TTL_SECONDS = 75
+ALLOWED_ADMIN_TABS = {
+    "dashboard",
+    "computadores",
+    "mapa",
+    "simulador",
+    "criterios",
+    "pessoas",
+    "alocacoes",
+    "monitores",
+    "etiquetas",
+    "rede",
+    "solicitacoes",
+    "parametros",
+}
+
+
+def _log_audit(
+    conn: Any,
+    action: str,
+    target: str = "",
+    details: str = "",
+    actor: Optional[str] = None,
+) -> None:
+    who = actor if actor is not None else (_CURRENT_ADMIN_ACTOR.get() or "")
     conn.execute(
-        "INSERT INTO audit_log(timestamp, action, target, details) VALUES (?, ?, ?, ?)",
-        (_now_iso(), action, target, details),
+        "INSERT INTO audit_log(timestamp, action, target, details, actor) VALUES (?, ?, ?, ?, ?)",
+        (_now_iso(), action, target, details, who),
     )
+
+
+def _needs_admin_bootstrap(conn: Any) -> bool:
+    row = conn.execute("SELECT COUNT(*) AS cnt FROM admin_users").fetchone()
+    return (int(row["cnt"] or 0) if row is not None else 0) == 0
+
+
+def _resolve_session_claims(conn: Any, claims: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not claims:
+        return None
+    uid = int(claims.get("uid") or 0)
+    sid = str(claims.get("sid") or "")
+    if uid <= 0:
+        nome = str(claims.get("nome") or "Administrador")
+        return {"uid": 0, "nusp": "", "nome": nome, "sid": sid, "actor_label": nome}
+
+    user_row = conn.execute(
+        "SELECT id, numero_usp, nome, is_active FROM admin_users WHERE id = ?",
+        (uid,),
+    ).fetchone()
+    if not user_row or not int(user_row["is_active"] or 0):
+        return None
+    if sid:
+        sess_row = conn.execute(
+            "SELECT logged_out_at FROM admin_sessions WHERE session_id = ?",
+            (sid,),
+        ).fetchone()
+        if sess_row and (sess_row["logged_out_at"] or "").strip():
+            return None
+    nusp = str(user_row["numero_usp"] or "")
+    nome = str(user_row["nome"] or "")
+    return {
+        "uid": int(user_row["id"]),
+        "nusp": nusp,
+        "nome": nome,
+        "sid": sid,
+        "actor_label": f"{nome} ({nusp})" if nusp else nome,
+    }
+
+
+def _touch_admin_session(conn: Any, admin_info: Dict[str, Any], active_tab: str = "") -> None:
+    sid = str(admin_info.get("sid") or "")
+    if not sid:
+        return
+    now = _now_iso()
+    tab = active_tab.strip() if active_tab and active_tab.strip() in ALLOWED_ADMIN_TABS else ""
+    if tab:
+        conn.execute(
+            """
+            UPDATE admin_sessions
+            SET last_seen_at = ?, active_tab = ?
+            WHERE session_id = ? AND (logged_out_at IS NULL OR logged_out_at = '')
+            """,
+            (now, tab, sid),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE admin_sessions
+            SET last_seen_at = ?
+            WHERE session_id = ? AND (logged_out_at IS NULL OR logged_out_at = '')
+            """,
+            (now, sid),
+        )
+
+
+def _perform_admin_login(conn: Any, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any], Optional[str]]:
+    nusp_raw = body.get("numero_usp", "")
+    bootstrap_name = str(body.get("nome") or "").strip()
+    pw = str(body.get("password") or "")
+    active_tab = str(body.get("active_tab") or "dashboard").strip()
+    if active_tab not in ALLOWED_ADMIN_TABS:
+        active_tab = "dashboard"
+
+    user, err_msg, code = authenticate_admin_user(conn, nusp_raw, pw, bootstrap_name)
+    if not user:
+        clean_nusp = normalize_nusp(nusp_raw)
+        actor = clean_nusp or "Não identificado"
+        _log_audit(conn, "ADMIN_LOGIN_FAILED", clean_nusp or "auth", f"{code}: {err_msg}", actor=actor)
+        return (
+            HTTPStatus.UNAUTHORIZED,
+            {"error": err_msg, "needs_bootstrap": _needs_admin_bootstrap(conn), "code": code},
+            None,
+        )
+
+    sid = secrets.token_hex(16)
+    now = _now_iso()
+    conn.execute(
+        """
+        INSERT INTO admin_sessions(
+            session_id, user_id, numero_usp, nome, active_tab, logged_in_at, last_seen_at, logged_out_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, '')
+        """,
+        (sid, user["id"], user["numero_usp"], user["nome"], active_tab, now, now),
+    )
+    actor_label = f"{user['nome']} ({user['numero_usp']})"
+    login_note = "1º administrador cadastrado no bootstrap" if code == "BOOTSTRAP_OK" else "Sessão administrativa iniciada"
+    _log_audit(conn, "ADMIN_LOGIN", f"NUSP {user['numero_usp']}", login_note, actor=actor_label)
+    token = create_session_token(
+        {"uid": int(user["id"]), "nusp": user["numero_usp"], "nome": user["nome"], "sid": sid}
+    )
+    return (
+        HTTPStatus.OK,
+        {
+            "is_admin": True,
+            "needs_bootstrap": False,
+            "user": {
+                "id": int(user["id"]),
+                "numero_usp": user["numero_usp"],
+                "nome": user["nome"],
+                "session_id": sid,
+            },
+        },
+        token,
+    )
+
+
+def _perform_admin_logout(conn: Any, raw_claims: Optional[Dict[str, Any]]) -> None:
+    resolved = _resolve_session_claims(conn, raw_claims)
+    sid = str((raw_claims or {}).get("sid") or "")
+    if sid:
+        conn.execute(
+            "UPDATE admin_sessions SET logged_out_at = ? WHERE session_id = ?",
+            (_now_iso(), sid),
+        )
+    if resolved:
+        _log_audit(
+            conn,
+            "ADMIN_LOGOUT",
+            f"NUSP {resolved['nusp']}" if resolved.get("nusp") else "auth",
+            "Sessão administrativa encerrada",
+            actor=resolved.get("actor_label") or "",
+        )
+
+
+def _get_collab_payload(conn: Any, admin_info: Dict[str, Any]) -> Dict[str, Any]:
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=ONLINE_SESSION_TTL_SECONDS)).isoformat()
+    sess_rows = conn.execute(
+        """
+        SELECT session_id, user_id, numero_usp, nome, active_tab, last_seen_at
+        FROM admin_sessions
+        WHERE (logged_out_at IS NULL OR logged_out_at = '')
+          AND last_seen_at >= ?
+        ORDER BY last_seen_at DESC
+        """,
+        (cutoff,),
+    ).fetchall()
+
+    my_uid = int(admin_info.get("uid") or 0)
+    my_sid = str(admin_info.get("sid") or "")
+    seen_uids: set[int] = set()
+    online_admins = []
+    for r in sess_rows:
+        uid = int(r["user_id"] or 0)
+        if uid in seen_uids:
+            continue
+        seen_uids.add(uid)
+        is_self = (bool(my_sid) and r["session_id"] == my_sid) or (my_uid > 0 and uid == my_uid)
+        online_admins.append(
+            {
+                "user_id": uid,
+                "numero_usp": r["numero_usp"] or "",
+                "nome": r["nome"] or "",
+                "active_tab": r["active_tab"] or "dashboard",
+                "last_seen_at": r["last_seen_at"] or "",
+                "is_self": is_self,
+            }
+        )
+
+    other_online_count = sum(1 for item in online_admins if not item["is_self"])
+    msg_rows = conn.execute(
+        """
+        SELECT id, user_id, numero_usp, author_name, message, created_at
+        FROM admin_chat_messages
+        ORDER BY id DESC
+        LIMIT 60
+        """
+    ).fetchall()
+    messages = [
+        {
+            "id": int(m["id"]),
+            "user_id": int(m["user_id"] or 0),
+            "numero_usp": m["numero_usp"] or "",
+            "author_name": m["author_name"] or "",
+            "message": m["message"] or "",
+            "created_at": m["created_at"] or "",
+            "is_self": (my_uid > 0 and int(m["user_id"] or 0) == my_uid),
+        }
+        for m in reversed(msg_rows)
+    ]
+    return {
+        "online_admins": online_admins,
+        "other_online_count": other_online_count,
+        "messages": messages,
+        "latest_message_id": int(messages[-1]["id"]) if messages else 0,
+    }
+
+
+def _get_admin_users_payload(conn: Any) -> Dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT id, numero_usp, nome, is_active, created_at, created_by
+        FROM admin_users
+        ORDER BY is_active DESC, nome ASC, id ASC
+        """
+    ).fetchall()
+    return {
+        "items": [
+            {
+                "id": int(r["id"]),
+                "numero_usp": r["numero_usp"],
+                "nome": r["nome"],
+                "is_active": bool(int(r["is_active"] or 0)),
+                "created_at": r["created_at"] or "",
+                "created_by": r["created_by"] or "",
+            }
+            for r in rows
+        ]
+    }
+
+
+def _create_admin_user_record(conn: Any, body: Dict[str, Any], creator_label: str) -> Dict[str, Any]:
+    nusp = normalize_nusp(body.get("numero_usp"))
+    nome = " ".join(str(body.get("nome") or "").split())
+    if len(nusp) < 4 or len(nusp) > 15:
+        raise ValueError("Número USP inválido (informe de 4 a 15 dígitos).")
+    if len(nome) < 2:
+        raise ValueError("Informe o nome completo do administrador.")
+    existing = conn.execute(
+        "SELECT id FROM admin_users WHERE numero_usp = ?",
+        (nusp,),
+    ).fetchone()
+    if existing:
+        raise ValueError("Este Número USP já está cadastrado como administrador.")
+    now = _now_iso()
+    cur = conn.execute(
+        """
+        INSERT INTO admin_users(numero_usp, nome, is_active, created_at, created_by)
+        VALUES (?, ?, 1, ?, ?)
+        """,
+        (nusp, nome, now, creator_label),
+    )
+    _log_audit(conn, "CREATE_ADMIN_USER", f"NUSP {nusp}", nome)
+    return {
+        "ok": True,
+        "item": {
+            "id": int(cur.lastrowid),
+            "numero_usp": nusp,
+            "nome": nome,
+            "is_active": True,
+            "created_at": now,
+            "created_by": creator_label,
+        },
+    }
+
+
+def _update_admin_user_record(conn: Any, user_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    row = conn.execute(
+        "SELECT id, numero_usp, nome, is_active FROM admin_users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    if not row:
+        raise LookupError("Administrador não encontrado.")
+    nome = " ".join(str(body.get("nome") if "nome" in body else (row["nome"] or "")).split())
+    if len(nome) < 2:
+        raise ValueError("Informe um nome válido para o administrador.")
+    active = bool(body.get("is_active")) if "is_active" in body else bool(int(row["is_active"] or 0))
+    if not active:
+        other_cnt = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM admin_users WHERE is_active = 1 AND id != ?",
+            (user_id,),
+        ).fetchone()
+        if int((other_cnt["cnt"] if other_cnt else 0) or 0) == 0:
+            raise ValueError("Não é possível desativar o último administrador ativo.")
+        conn.execute(
+            "UPDATE admin_sessions SET logged_out_at = ? WHERE user_id = ? AND (logged_out_at IS NULL OR logged_out_at = '')",
+            (_now_iso(), user_id),
+        )
+    conn.execute(
+        "UPDATE admin_users SET nome = ?, is_active = ? WHERE id = ?",
+        (nome, 1 if active else 0, user_id),
+    )
+    _log_audit(
+        conn,
+        "UPDATE_ADMIN_USER",
+        f"NUSP {row['numero_usp']}",
+        f"{nome} ({'Ativo' if active else 'Inativo'})",
+    )
+    return {"ok": True}
+
+
+def _delete_admin_user_record(conn: Any, user_id: int, current_uid: int) -> Dict[str, Any]:
+    row = conn.execute(
+        "SELECT id, numero_usp, nome, is_active FROM admin_users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    if not row:
+        raise LookupError("Administrador não encontrado.")
+    if current_uid > 0 and user_id == current_uid:
+        raise ValueError("Você não pode excluir o próprio usuário atualmente conectado.")
+    other_cnt = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM admin_users WHERE is_active = 1 AND id != ?",
+        (user_id,),
+    ).fetchone()
+    if int((other_cnt["cnt"] if other_cnt else 0) or 0) == 0:
+        raise ValueError("Não é possível excluir o último administrador ativo.")
+    conn.execute("DELETE FROM admin_users WHERE id = ?", (user_id,))
+    conn.execute(
+        "UPDATE admin_sessions SET logged_out_at = ? WHERE user_id = ? AND (logged_out_at IS NULL OR logged_out_at = '')",
+        (_now_iso(), user_id),
+    )
+    _log_audit(conn, "DELETE_ADMIN_USER", f"NUSP {row['numero_usp']}", f"Removido ({row['nome']})")
+    return {"ok": True}
 
 
 def _to_opt_float(val: Any) -> Optional[float]:
@@ -817,11 +1160,26 @@ class LSEEController:
     def __init__(self) -> None:
         self._response: Optional[Response] = None
 
-    def _is_admin(self) -> bool:
+    def _extract_raw_claims(self) -> Optional[Dict[str, Any]]:
         token = request.cookies.get(SESSION_COOKIE_NAME) or extract_session_from_headers(
             request.headers.get("Cookie")
         )
-        return verify_session_token(token or "")
+        return parse_session_token(token or "")
+
+    def _resolve_request_admin(self, touch: bool = False) -> Optional[Dict[str, Any]]:
+        claims = self._extract_raw_claims()
+        if not claims:
+            self._admin_user = None
+            return None
+        with db_session() as conn:
+            resolved = _resolve_session_claims(conn, claims)
+            if resolved and touch:
+                _touch_admin_session(conn, resolved)
+        self._admin_user = resolved
+        return resolved
+
+    def _is_admin(self) -> bool:
+        return self._resolve_request_admin(touch=False) is not None
 
     def _send_json(
         self,
@@ -883,7 +1241,8 @@ class LSEEController:
         return data
 
     def _require_admin(self) -> bool:
-        if not self._is_admin():
+        resolved = self._resolve_request_admin(touch=True)
+        if not resolved:
             self._send_json(
                 {"error": "Acesso restrito. Autentique-se como administrador."},
                 status=HTTPStatus.UNAUTHORIZED,
@@ -921,7 +1280,29 @@ class LSEEController:
 
         try:
             if path == "/api/auth/status":
-                self._send_json({"is_admin": self._is_admin()})
+                claims = self._extract_raw_claims()
+                with db_session() as conn:
+                    needs_bootstrap = _needs_admin_bootstrap(conn)
+                    resolved = _resolve_session_claims(conn, claims)
+                    if resolved:
+                        _touch_admin_session(conn, resolved)
+                user_out = (
+                    {
+                        "id": resolved["uid"],
+                        "numero_usp": resolved["nusp"],
+                        "nome": resolved["nome"],
+                        "session_id": resolved["sid"],
+                    }
+                    if resolved
+                    else None
+                )
+                self._send_json(
+                    {
+                        "is_admin": resolved is not None,
+                        "needs_bootstrap": needs_bootstrap,
+                        "user": user_out,
+                    }
+                )
                 return self._response  # type: ignore[return-value]
 
             if path == "/api/public/dashboard":
@@ -961,7 +1342,11 @@ class LSEEController:
             if path.startswith("/api/admin/"):
                 if not self._require_admin():
                     return self._response  # type: ignore[return-value]
-                self._route_admin_get(path, qs)
+                tok = _CURRENT_ADMIN_ACTOR.set((getattr(self, "_admin_user", None) or {}).get("actor_label") or "")
+                try:
+                    self._route_admin_get(path, qs)
+                finally:
+                    _CURRENT_ADMIN_ACTOR.reset(tok)
                 return self._response  # type: ignore[return-value]
 
             self._send_json({"error": "Endpoint não encontrado."}, status=HTTPStatus.NOT_FOUND)
@@ -974,19 +1359,15 @@ class LSEEController:
         try:
             if path == "/api/auth/login":
                 body = self._read_json_body()
-                pw = str(body.get("password", ""))
                 with db_session() as conn:
-                    ok = verify_admin_login(conn, pw)
-                    if not ok:
-                        _log_audit(conn, "ADMIN_LOGIN_FAILED", "auth", "Tentativa com senha incorreta")
-                        self._send_json({"error": "Senha inválida."}, status=HTTPStatus.UNAUTHORIZED)
-                        return self._response  # type: ignore[return-value]
-                    _log_audit(conn, "ADMIN_LOGIN", "auth", "Sessão administrativa iniciada")
-                token = create_session_token()
-                self._send_json({"is_admin": True}, cookie_token=token)
+                    status, payload, token = _perform_admin_login(conn, body)
+                self._send_json(payload, status=status, cookie_token=token)
                 return self._response  # type: ignore[return-value]
 
             if path == "/api/auth/logout":
+                claims = self._extract_raw_claims()
+                with db_session() as conn:
+                    _perform_admin_logout(conn, claims)
                 self._send_json({"is_admin": False}, clear_cookie=True)
                 return self._response  # type: ignore[return-value]
 
@@ -994,12 +1375,18 @@ class LSEEController:
                 if not self._require_admin():
                     return self._response  # type: ignore[return-value]
                 body = self._read_json_body()
-                self._route_admin_post(path, body)
+                tok = _CURRENT_ADMIN_ACTOR.set((getattr(self, "_admin_user", None) or {}).get("actor_label") or "")
+                try:
+                    self._route_admin_post(path, body)
+                finally:
+                    _CURRENT_ADMIN_ACTOR.reset(tok)
                 return self._response  # type: ignore[return-value]
 
             self._send_json({"error": "Endpoint não encontrado."}, status=HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except LookupError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
         return self._response  # type: ignore[return-value]
@@ -1011,11 +1398,17 @@ class LSEEController:
                 if not self._require_admin():
                     return self._response  # type: ignore[return-value]
                 body = self._read_json_body()
-                self._route_admin_put(path, body)
+                tok = _CURRENT_ADMIN_ACTOR.set((getattr(self, "_admin_user", None) or {}).get("actor_label") or "")
+                try:
+                    self._route_admin_put(path, body)
+                finally:
+                    _CURRENT_ADMIN_ACTOR.reset(tok)
                 return self._response  # type: ignore[return-value]
             self._send_json({"error": "Endpoint não encontrado."}, status=HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except LookupError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
         return self._response  # type: ignore[return-value]
@@ -1026,11 +1419,17 @@ class LSEEController:
             if path.startswith("/api/admin/"):
                 if not self._require_admin():
                     return self._response  # type: ignore[return-value]
-                self._route_admin_delete(path)
+                tok = _CURRENT_ADMIN_ACTOR.set((getattr(self, "_admin_user", None) or {}).get("actor_label") or "")
+                try:
+                    self._route_admin_delete(path)
+                finally:
+                    _CURRENT_ADMIN_ACTOR.reset(tok)
                 return self._response  # type: ignore[return-value]
             self._send_json({"error": "Endpoint não encontrado."}, status=HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except LookupError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
         return self._response  # type: ignore[return-value]
@@ -1191,7 +1590,7 @@ class LSEEController:
                 logs = [
                     dict(r)
                     for r in conn.execute(
-                        "SELECT id, timestamp, action, target, details FROM audit_log ORDER BY id DESC LIMIT 15"
+                        "SELECT id, timestamp, action, target, details, COALESCE(actor, '') AS actor FROM audit_log ORDER BY id DESC LIMIT 15"
                     ).fetchall()
                 ]
                 self._send_json(
@@ -1330,10 +1729,22 @@ class LSEEController:
                 rows = [
                     dict(r)
                     for r in conn.execute(
-                        "SELECT id, timestamp, action, target, details FROM audit_log ORDER BY id DESC LIMIT 100"
+                        "SELECT id, timestamp, action, target, details, COALESCE(actor, '') AS actor FROM audit_log ORDER BY id DESC LIMIT 100"
                     ).fetchall()
                 ]
                 self._send_json({"items": rows})
+                return
+
+            if path == "/api/admin/collab":
+                admin_info = getattr(self, "_admin_user", None) or {}
+                tab_arg = (qs.get("tab", [""])[0] or "").strip()
+                if tab_arg:
+                    _touch_admin_session(conn, admin_info, active_tab=tab_arg)
+                self._send_json(_get_collab_payload(conn, admin_info))
+                return
+
+            if path == "/api/admin/users":
+                self._send_json(_get_admin_users_payload(conn))
                 return
 
             if path == "/api/admin/release-tutorial":
@@ -1716,6 +2127,42 @@ class LSEEController:
                 self._send_json(res)
                 return
 
+            if path == "/api/admin/collab/heartbeat":
+                admin_info = getattr(self, "_admin_user", None) or {}
+                _touch_admin_session(conn, admin_info, active_tab=str(body.get("active_tab") or ""))
+                self._send_json(_get_collab_payload(conn, admin_info))
+                return
+
+            if path == "/api/admin/collab/chat":
+                admin_info = getattr(self, "_admin_user", None) or {}
+                msg = " ".join(str(body.get("message") or "").split())
+                if not msg:
+                    raise ValueError("Digite uma mensagem para enviar.")
+                if len(msg) > 1000:
+                    raise ValueError("Mensagem muito longa (máximo de 1000 caracteres).")
+                _touch_admin_session(conn, admin_info, active_tab=str(body.get("active_tab") or ""))
+                conn.execute(
+                    """
+                    INSERT INTO admin_chat_messages(user_id, numero_usp, author_name, message, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(admin_info.get("uid") or 0),
+                        str(admin_info.get("nusp") or ""),
+                        str(admin_info.get("nome") or "Administrador"),
+                        msg,
+                        _now_iso(),
+                    ),
+                )
+                self._send_json(_get_collab_payload(conn, admin_info), status=HTTPStatus.CREATED)
+                return
+
+            if path == "/api/admin/users":
+                creator = (getattr(self, "_admin_user", None) or {}).get("actor_label") or "Administrador"
+                res = _create_admin_user_record(conn, body, creator)
+                self._send_json(res, status=HTTPStatus.CREATED)
+                return
+
             if path == "/api/admin/requests":
                 payload = body
                 if body.get("reset_item_dates") and isinstance(body.get("items"), list):
@@ -1989,10 +2436,22 @@ class LSEEController:
                 self._send_json({"ok": True, "content": content, "updated_at": now})
                 return
 
+            if path.startswith("/api/admin/users/"):
+                user_pk = int(path.split("/")[4])
+                res = _update_admin_user_record(conn, user_pk, body)
+                self._send_json(res)
+                return
+
             self._send_json({"error": "Rota PUT administrativa não encontrada."}, status=HTTPStatus.NOT_FOUND)
 
     def _route_admin_delete(self, path: str) -> None:
         with db_session() as conn:
+            if path.startswith("/api/admin/users/"):
+                user_pk = int(path.split("/")[4])
+                current_uid = int((getattr(self, "_admin_user", None) or {}).get("uid") or 0)
+                res = _delete_admin_user_record(conn, user_pk, current_uid)
+                self._send_json(res)
+                return
             if path.startswith("/api/admin/monitors/"):
                 m_pk = int(path.split("/")[4])
                 conn.execute("DELETE FROM monitors WHERE id = ?", (m_pk,))

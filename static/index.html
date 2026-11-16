@@ -23,6 +23,7 @@
       </div>
       <div class="topbar-actions">
         <span id="mode-badge" class="badge badge-public">Visão Pública</span>
+        <button id="admin-presence-pill" class="presence-pill hidden" type="button" title="Ver administradores conectados e abrir chat"></button>
         <button id="btn-usage-rules" class="btn btn-secondary btn-sm" type="button" title="Regras internas de uso dos computadores do LSEE">Regras de Uso</button>
         <button id="btn-admin-help" class="btn btn-secondary btn-help-icon hidden" type="button" title="Instruções de uso do Administrador" aria-label="Instruções de uso do modo administrador">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -53,6 +54,7 @@
   </header>
 
   <main class="container">
+    <div id="collab-warning-banner" class="collab-warning-banner hidden"></div>
     <div id="toast-area" class="toast-area" aria-live="polite"></div>
 
     <!-- TAB: DASHBOARD -->
@@ -110,6 +112,31 @@
       <div id="modal-body" class="modal-body"></div>
     </div>
   </div>
+
+  <!-- MINI CHAT LATERAL (MODO ADMIN) -->
+  <aside id="admin-chat-widget" class="admin-chat-widget hidden" aria-label="Chat entre administradores">
+    <div id="admin-chat-panel" class="admin-chat-panel hidden">
+      <div class="admin-chat-head">
+        <div>
+          <strong>Chat entre ADMs</strong>
+          <span id="admin-chat-online-count" class="admin-chat-sub">0 online</span>
+        </div>
+        <button id="btn-chat-close" class="btn-icon" type="button" aria-label="Minimizar chat" style="color:#fff;">&minus;</button>
+      </div>
+      <div id="admin-chat-online-list" class="admin-chat-online-list"></div>
+      <div id="admin-chat-messages" class="admin-chat-messages"></div>
+      <form id="admin-chat-form" class="admin-chat-form">
+        <input id="admin-chat-input" class="input" type="text" maxlength="1000" placeholder="Mensagem rápida aos ADMs..." autocomplete="off" />
+        <button class="btn btn-primary btn-sm" type="submit">Enviar</button>
+      </form>
+    </div>
+    <button id="btn-chat-toggle" class="admin-chat-toggle" type="button">
+      <span class="presence-dot"></span>
+      <span>Chat ADMs</span>
+      <span id="admin-chat-toggle-meta" class="admin-chat-toggle-meta"></span>
+      <span id="admin-chat-unread" class="admin-chat-unread hidden">0</span>
+    </button>
+  </aside>
 
   <script src="/static/app.js"></script>
 </body>

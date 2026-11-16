@@ -281,12 +281,47 @@ SCHEMA_STATEMENTS = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
     """
+    CREATE TABLE IF NOT EXISTS admin_users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        numero_usp VARCHAR(32) NOT NULL UNIQUE,
+        nome VARCHAR(255) NOT NULL,
+        is_active TINYINT NOT NULL DEFAULT 1,
+        created_at VARCHAR(100) NOT NULL,
+        created_by VARCHAR(255) DEFAULT ''
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS admin_sessions (
+        session_id VARCHAR(64) PRIMARY KEY,
+        user_id INT NOT NULL,
+        numero_usp VARCHAR(32) NOT NULL,
+        nome VARCHAR(255) NOT NULL,
+        active_tab VARCHAR(100) DEFAULT 'dashboard',
+        logged_in_at VARCHAR(100) NOT NULL,
+        last_seen_at VARCHAR(100) NOT NULL,
+        logged_out_at VARCHAR(100) DEFAULT '',
+        INDEX idx_admin_sessions_seen (last_seen_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS admin_chat_messages (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        numero_usp VARCHAR(32) NOT NULL,
+        author_name VARCHAR(255) NOT NULL,
+        message TEXT NOT NULL,
+        created_at VARCHAR(100) NOT NULL,
+        INDEX idx_admin_chat_created (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
     CREATE TABLE IF NOT EXISTS audit_log (
         id INT AUTO_INCREMENT PRIMARY KEY,
         timestamp VARCHAR(100) NOT NULL,
         action VARCHAR(100) NOT NULL,
         target VARCHAR(255),
-        details TEXT
+        details TEXT,
+        actor VARCHAR(255) DEFAULT ''
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
 ]
@@ -426,6 +461,14 @@ def ensure_default_params(conn: MySQLConnectionWrapper) -> None:
     )
 
 
+def ensure_schema_columns(conn: MySQLConnectionWrapper) -> None:
+    """Adiciona colunas novas em tabelas já existentes sem perda de dados."""
+    try:
+        conn.execute("SELECT actor FROM audit_log LIMIT 1").fetchone()
+    except Exception:
+        conn.execute("ALTER TABLE audit_log ADD COLUMN actor VARCHAR(255) DEFAULT ''")
+
+
 def init_schema() -> None:
     """Cria as tabelas no MySQL caso ainda não existam e garante parâmetros padrão."""
     global _SCHEMA_READY
@@ -433,6 +476,7 @@ def init_schema() -> None:
     try:
         for stmt in SCHEMA_STATEMENTS:
             conn.execute(stmt)
+        ensure_schema_columns(conn)
         ensure_default_params(conn)
         conn.commit()
         _SCHEMA_READY = True

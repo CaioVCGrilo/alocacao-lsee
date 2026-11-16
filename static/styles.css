@@ -1759,6 +1759,220 @@ tbody tr:hover {
   }
 }
 
+/* ==================== PRESENÇA DE ADMS & MINI CHAT ==================== */
+.presence-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border-radius: 999px;
+  padding: 5px 11px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--success-bg);
+  color: var(--success);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.presence-pill:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(8, 36, 54, 0.12);
+}
+
+.presence-pill.has-others {
+  background: var(--warning-bg);
+  border-color: #f59e0b;
+  color: #92400e;
+}
+
+.presence-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #10b981;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.presence-pill.has-others .presence-dot {
+  background: #d97706;
+}
+
+.collab-warning-banner {
+  background: var(--warning-bg);
+  border: 1px solid #f59e0b;
+  color: #78350f;
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.86rem;
+}
+
+.admin-chat-widget {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.admin-chat-panel {
+  width: 345px;
+  max-width: calc(100vw - 24px);
+  height: 430px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 14px 34px rgba(8, 36, 54, 0.22);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.admin-chat-head {
+  background: var(--brand-deep);
+  color: #ffffff;
+  padding: 10px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.admin-chat-sub {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--brand-cyan);
+}
+
+.admin-chat-online-list {
+  padding: 8px 10px;
+  background: var(--surface-alt);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.admin-chat-online-chip {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.73rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.admin-chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #f8fbfe;
+}
+
+.chat-bubble {
+  max-width: 86%;
+  align-self: flex-start;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 7px 10px;
+  font-size: 0.83rem;
+  box-shadow: 0 1px 2px rgba(8, 36, 54, 0.04);
+}
+
+.chat-bubble.is-self {
+  align-self: flex-end;
+  background: var(--brand-soft);
+  border-color: var(--brand-soft-border);
+}
+
+.chat-bubble-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.7rem;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.chat-bubble-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.admin-chat-form {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  background: #ffffff;
+  display: flex;
+  gap: 6px;
+}
+
+.admin-chat-form .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.admin-chat-toggle {
+  background: var(--brand);
+  color: #ffffff;
+  border: none;
+  border-radius: 999px;
+  padding: 10px 16px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 6px 18px rgba(0, 99, 151, 0.28);
+}
+
+.admin-chat-toggle:hover {
+  background: var(--brand-hover);
+}
+
+.admin-chat-toggle-meta {
+  font-size: 0.74rem;
+  opacity: 0.9;
+}
+
+.admin-chat-unread {
+  background: #dc2626;
+  color: #ffffff;
+  border-radius: 999px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.admin-inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-end;
+  margin-bottom: 12px;
+}
+
 @media print {
   @page {
     size: A4 portrait;
@@ -1782,7 +1996,9 @@ tbody tr:hover {
   body.printing-map .map-toolbar,
   body.printing-map .map-sidebar,
   body.printing-map #map-swap-banner-slot,
-  body.printing-map .banner-info {
+  body.printing-map .banner-info,
+  body.printing-map #admin-chat-widget,
+  body.printing-map #collab-warning-banner {
     display: none !important;
   }
 

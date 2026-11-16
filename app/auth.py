@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import json
 import os
+import re
 import secrets
 import threading
 import time
 from datetime import datetime, timezone
 from http.cookies import SimpleCookie
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from .config import SESSION_COOKIE_NAME, SESSION_TTL_SECONDS
 from .db import db_session
@@ -160,34 +163,116 @@ def get_session_secret() -> bytes:
             return _CACHED_SESSION_SECRET
 
 
-def create_session_token(ttl: int = SESSION_TTL_SECONDS) -> str:
-    """Emite token de sessão assinado com HMAC-SHA512."""
+def normalize_nusp(raw: Any) -> str:
+    """Mantém apenas dígitos do Número USP para comparação consistente."""
+    return re.sub(r"\D", "", str(raw or ""))
+
+
+def authenticate_admin_user(
+    conn: Any,
+    numero_usp: Any,
+    password: str,
+    bootstrap_name: str = "",
+) -> Tuple[Optional[Dict[str, Any]], str, str]:
+    """Valida a senha administrativa única e garante que o Número USP esteja cadastrado."""
+    nusp = normalize_nusp(numero_usp)
+    if not verify_admin_login(conn, password):
+        return None, "Número USP não autorizado ou senha incorreta.", "BAD_PASSWORD"
+
+    if len(nusp) < 4 or len(nusp) > 15:
+        return None, "Informe um Número USP válido (4 a 15 dígitos).", "INVALID_NUSP"
+
+    row_cnt = conn.execute("SELECT COUNT(*) AS cnt FROM admin_users").fetchone()
+    total_admins = int(row_cnt["cnt"] or 0) if row_cnt is not None else 0
+    if total_admins == 0:
+        clean_name = " ".join(str(bootstrap_name or "").split())
+        if len(clean_name) < 2:
+            return (
+                None,
+                "Primeiro acesso: informe também seu Nome junto ao Número USP para cadastrar o 1º administrador.",
+                "BOOTSTRAP_NAME_REQUIRED",
+            )
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """
+            INSERT INTO admin_users(numero_usp, nome, is_active, created_at, created_by)
+            VALUES (?, ?, 1, ?, 'bootstrap')
+            """,
+            (nusp, clean_name, now),
+        )
+        created = conn.execute(
+            "SELECT id, numero_usp, nome, is_active FROM admin_users WHERE numero_usp = ?",
+            (nusp,),
+        ).fetchone()
+        return dict(created), "", "BOOTSTRAP_OK"
+
+    user_row = conn.execute(
+        "SELECT id, numero_usp, nome, is_active FROM admin_users WHERE numero_usp = ?",
+        (nusp,),
+    ).fetchone()
+    if user_row is None:
+        return None, "Acesso negado: este Número USP não está cadastrado como administrador.", "UNREGISTERED_NUSP"
+    if not int(user_row["is_active"] or 0):
+        return None, "Acesso negado: este Número USP administrativo está desativado.", "INACTIVE_NUSP"
+    return dict(user_row), "", "OK"
+
+
+def create_session_token(
+    claims: Optional[Dict[str, Any]] = None,
+    ttl: int = SESSION_TTL_SECONDS,
+) -> str:
+    """Emite token de sessão assinado com HMAC-SHA512 (com identificação opcional de ADM)."""
     expiry = int(time.time()) + ttl
     nonce = secrets.token_hex(32)
-    payload = f"{expiry}.{nonce}"
+    if claims:
+        raw_claims = json.dumps(claims, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        b64_claims = base64.urlsafe_b64encode(raw_claims).decode("ascii").rstrip("=")
+        payload = f"{expiry}.{nonce}.{b64_claims}"
+    else:
+        payload = f"{expiry}.{nonce}"
     sig = hmac.new(get_session_secret(), payload.encode("utf-8"), hashlib.sha512).hexdigest()
     return f"{payload}.{sig}"
 
 
-def verify_session_token(token: str) -> bool:
-    """Valida assinatura HMAC-SHA512 e expiração do token de sessão."""
+def parse_session_token(token: str) -> Optional[Dict[str, Any]]:
+    """Valida assinatura HMAC-SHA512 e expiração do token e retorna os dados do ADM."""
     if not token:
-        return False
+        return None
     parts = token.split(".")
-    if len(parts) != 3:
-        return False
-    expiry_str, nonce, sig = parts
+    if len(parts) not in (3, 4):
+        return None
+    expiry_str = parts[0]
+    sig = parts[-1]
+    payload = ".".join(parts[:-1])
     try:
         expiry = int(expiry_str)
     except ValueError:
-        return False
+        return None
     if expiry < int(time.time()):
-        return False
-    payload = f"{expiry_str}.{nonce}"
+        return None
     expected_sig = hmac.new(
         get_session_secret(), payload.encode("utf-8"), hashlib.sha512
     ).hexdigest()
-    return hmac.compare_digest(sig, expected_sig)
+    if not hmac.compare_digest(sig, expected_sig):
+        return None
+    if len(parts) == 3:
+        return {"uid": 0, "nusp": "", "nome": "Administrador", "sid": ""}
+    try:
+        padded = parts[2] + "=" * (-len(parts[2]) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        return {
+            "uid": int(decoded.get("uid") or 0),
+            "nusp": str(decoded.get("nusp") or ""),
+            "nome": str(decoded.get("nome") or "Administrador"),
+            "sid": str(decoded.get("sid") or ""),
+        }
+    except Exception:
+        return None
+
+
+def verify_session_token(token: str) -> bool:
+    """Valida assinatura HMAC-SHA512 e expiração do token de sessão."""
+    return parse_session_token(token) is not None
 
 
 def extract_session_from_headers(cookie_header: Optional[str]) -> Optional[str]:
