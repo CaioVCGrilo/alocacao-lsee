@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LSEE · Alocação de Recursos</title>
+  <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-rail" aria-hidden="true"></div>
+    <div class="topbar-inner">
+      <div class="brand">
+        <a href="#dashboard" class="brand-logo-link" title="LSEE · Laboratório de Sistemas de Energia Elétrica">
+          <img src="/static/img/LSEE_logo.svg" alt="LSEE - Laboratório de Sistemas de Energia Elétrica" class="brand-logo" />
+        </a>
+        <div class="brand-divider" aria-hidden="true"></div>
+        <div class="brand-text">
+          <h1>Alocação de Recursos</h1>
+          <p class="subtitle">Gestão de computadores, prioridades e infraestrutura</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span id="mode-badge" class="badge badge-public">Visão Pública</span>
+        <button id="btn-admin-help" class="btn btn-secondary btn-help-icon hidden" type="button" title="Instruções de uso do Administrador" aria-label="Instruções de uso do modo administrador">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"></circle>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+          </svg>
+          <span>Instruções</span>
+        </button>
+        <button id="btn-admin-login" class="btn btn-primary" type="button">Área Admin</button>
+        <button id="btn-admin-logout" class="btn btn-secondary hidden" type="button">Sair do Admin</button>
+      </div>
+    </div>
+    <nav class="tabs" id="main-tabs">
+      <button class="tab active" data-tab="dashboard" type="button">Dashboard</button>
+      <button class="tab" data-tab="computadores" type="button">Computadores</button>
+      <button class="tab" data-tab="mapa" type="button">Mapa do LSEE</button>
+      <button class="tab" data-tab="simulador" type="button">Simulador</button>
+      <button class="tab admin-tab hidden" data-tab="criterios" type="button">Critérios</button>
+      <button class="tab admin-tab hidden" data-tab="pessoas" type="button">Pessoas</button>
+      <button class="tab admin-tab hidden" data-tab="alocacoes" type="button">Alocações</button>
+      <button class="tab admin-tab hidden" data-tab="monitores" type="button">Monitores</button>
+      <button class="tab admin-tab hidden" data-tab="etiquetas" type="button">Etiquetas</button>
+      <button class="tab admin-tab hidden" data-tab="rede" type="button">Rede</button>
+      <button class="tab admin-tab hidden" data-tab="parametros" type="button">Parâmetros &amp; Log</button>
+    </nav>
+  </header>
+
+  <main class="container">
+    <div id="toast-area" class="toast-area" aria-live="polite"></div>
+
+    <!-- TAB: DASHBOARD -->
+    <section id="tab-dashboard" class="tab-panel active"></section>
+
+    <!-- TAB: COMPUTADORES -->
+    <section id="tab-computadores" class="tab-panel"></section>
+
+    <!-- TAB: MAPA DO LSEE -->
+    <section id="tab-mapa" class="tab-panel"></section>
+
+    <!-- TAB: SIMULADOR -->
+    <section id="tab-simulador" class="tab-panel"></section>
+
+    <!-- TAB: CRITÉRIOS -->
+    <section id="tab-criterios" class="tab-panel"></section>
+
+    <!-- TAB: PESSOAS (ADMIN) -->
+    <section id="tab-pessoas" class="tab-panel"></section>
+
+    <!-- TAB: ALOCAÇÕES (ADMIN) -->
+    <section id="tab-alocacoes" class="tab-panel"></section>
+
+    <!-- TAB: MONITORES (ADMIN) -->
+    <section id="tab-monitores" class="tab-panel"></section>
+
+    <!-- TAB: ETIQUETAS (ADMIN) -->
+    <section id="tab-etiquetas" class="tab-panel"></section>
+
+    <!-- TAB: REDE (ADMIN) -->
+    <section id="tab-rede" class="tab-panel"></section>
+
+    <!-- TAB: PARÂMETROS & LOG (ADMIN) -->
+    <section id="tab-parametros" class="tab-panel"></section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="site-footer-inner">
+      <span><strong>LSEE</strong> · Laboratório de Sistemas de Energia Elétrica</span>
+      <span>Sistema interno de alocação de recursos</span>
+    </div>
+  </footer>
+
+  <!-- MODAL GENÉRICO (LOGIN / FORMULÁRIOS ADMIN) -->
+  <div id="modal-backdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal">
+      <div class="modal-rail" aria-hidden="true"></div>
+      <div class="modal-header">
+        <h2 id="modal-title">Título</h2>
+        <button id="modal-close" class="btn-icon" type="button" aria-label="Fechar">&times;</button>
+      </div>
+      <div id="modal-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
