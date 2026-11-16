@@ -58,14 +58,19 @@ const state = {
     pages: [Array(18).fill(null)],
   },
   requests: {
+    activeId: null,
+    activeCreatedAt: "",
+    mode: "auto",
+    dirty: false,
+    hydrated: false,
     orientador: "",
     laboratorio: "LSEE",
     data_solicitacao: new Date().toISOString().slice(0, 10),
     blankDate: false,
     items: [
-      { material: "", quantidade: "", patrimonio: "", valor: "" },
-      { material: "", quantidade: "", patrimonio: "", valor: "" },
-      { material: "", quantidade: "", patrimonio: "", valor: "" },
+      { material: "", quantidade: "", valor_unitario: "", patrimonio: "", valor: "", adicionado_em: "" },
+      { material: "", quantidade: "", valor_unitario: "", patrimonio: "", valor: "", adicionado_em: "" },
+      { material: "", quantidade: "", valor_unitario: "", patrimonio: "", valor: "", adicionado_em: "" },
     ],
     justificativa: "",
     equipmentOptions: [],
@@ -3759,6 +3764,11 @@ const PT_MONTHS_JS = [
   "", "janeiro", "fevereiro", "março", "abril", "maio", "junho",
   "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
 ];
+const REQUESTS_STORAGE_KEY = "lsee_requests_editor_v1";
+
+function emptyRequestItem() {
+  return { material: "", quantidade: "", valor_unitario: "", patrimonio: "", valor: "", adicionado_em: "" };
+}
 
 function parseMoneyVal(raw) {
   const s = String(raw ?? "").replace(/R\$/gi, "").trim();
@@ -3770,9 +3780,29 @@ function parseMoneyVal(raw) {
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
+function parseQtyNumber(raw) {
+  const s = String(raw ?? "").trim().replace(/\s+/g, " ");
+  if (!s) return null;
+  const m = /^(\d+(?:[.,]\d+)?)/.exec(s);
+  if (!m) return null;
+  const n = Number(m[1].replace(",", "."));
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function fmtInputMoneyPtBr(num) {
+  if (num === null || num === undefined || !Number.isFinite(num)) return "";
+  return num.toFixed(2).replace(".", ",");
+}
+
 function fmtBrlJs(num) {
   if (num === null || num === undefined || !Number.isFinite(num)) return "";
   return `R$ ${num.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function fmtDateBrShort(raw) {
+  const s = String(raw || "").trim().slice(0, 10);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : s;
 }
 
 function fmtReqDateJs(rs) {
@@ -3789,9 +3819,156 @@ function fmtReqDateJs(rs) {
   return `São Carlos, ${rs.data_solicitacao}`;
 }
 
+function recalcRequestItemTotal(it) {
+  const unit = parseMoneyVal(it.valor_unitario);
+  if (unit === null) return false;
+  const qty = parseQtyNumber(it.quantidade);
+  if (qty === null) return false;
+  const total = Math.round(unit * qty * 100) / 100;
+  it.valor = fmtInputMoneyPtBr(total);
+  return true;
+}
+
+function readSavedRequestDraft() {
+  try {
+    const raw = window.localStorage.getItem(REQUESTS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (_err) {
+    return null;
+  }
+}
+
+function persistRequestDraft(rs) {
+  try {
+    const payload = {
+      mode: rs.mode || (rs.activeId ? "active" : "blank"),
+      activeId: rs.activeId || null,
+      activeCreatedAt: rs.activeCreatedAt || "",
+      dirty: Boolean(rs.dirty),
+      orientador: rs.orientador || "",
+      laboratorio: rs.laboratorio ?? "LSEE",
+      data_solicitacao: rs.data_solicitacao || "",
+      blankDate: Boolean(rs.blankDate),
+      items: (rs.items || []).map((it) => ({
+        material: it.material || "",
+        quantidade: it.quantidade || "",
+        valor_unitario: it.valor_unitario ?? "",
+        patrimonio: it.patrimonio || "",
+        valor: it.valor ?? "",
+        adicionado_em: it.adicionado_em || "",
+      })),
+      justificativa: rs.justificativa || "",
+    };
+    window.localStorage.setItem(REQUESTS_STORAGE_KEY, JSON.stringify(payload));
+  } catch (_err) {
+    // Ignora caso localStorage esteja indisponível
+  }
+}
+
+function applyDraftDataToState(rs, draft, modeOverride = null, activeOverride = undefined) {
+  rs.mode = modeOverride || draft.mode || "blank";
+  if (activeOverride !== undefined) {
+    rs.activeId = activeOverride ? activeOverride.id : null;
+    rs.activeCreatedAt = activeOverride ? (activeOverride.created_at || "") : "";
+  } else {
+    rs.activeId = draft.activeId || null;
+    rs.activeCreatedAt = draft.activeCreatedAt || "";
+  }
+  rs.dirty = Boolean(draft.dirty);
+  rs.orientador = draft.orientador || "";
+  rs.laboratorio = draft.laboratorio ?? "LSEE";
+  rs.data_solicitacao = draft.data_solicitacao || new Date().toISOString().slice(0, 10);
+  rs.blankDate = Boolean(draft.blankDate);
+  const rows = Array.isArray(draft.items) && draft.items.length ? draft.items : [emptyRequestItem()];
+  rs.items = rows.map((i) => ({
+    material: i.material || "",
+    quantidade: i.quantidade || "",
+    valor_unitario: i.valor_unitario ?? "",
+    patrimonio: i.patrimonio || "",
+    valor: i.valor ?? "",
+    adicionado_em: i.adicionado_em || "",
+  }));
+  rs.justificativa = draft.justificativa || "";
+}
+
+function applySavedRequestToState(rs, reqObj) {
+  const created = reqObj.created_at || "";
+  const createdDate = created.slice(0, 10);
+  const rows = reqObj.items && reqObj.items.length ? reqObj.items : [emptyRequestItem()];
+  rs.activeId = reqObj.id || null;
+  rs.activeCreatedAt = created;
+  rs.mode = reqObj.id ? "active" : "blank";
+  rs.dirty = false;
+  rs.orientador = reqObj.orientador || "";
+  rs.laboratorio = reqObj.laboratorio || "";
+  rs.data_solicitacao = reqObj.data_solicitacao || "";
+  rs.blankDate = !reqObj.data_solicitacao;
+  rs.items = rows.map((i) => ({
+    material: i.material || "",
+    quantidade: i.quantidade || "",
+    valor_unitario: i.valor_unitario !== null && i.valor_unitario !== undefined
+      ? fmtInputMoneyPtBr(Number(i.valor_unitario))
+      : "",
+    patrimonio: i.patrimonio || "",
+    valor: i.valor !== null && i.valor !== undefined
+      ? fmtInputMoneyPtBr(Number(i.valor))
+      : "",
+    adicionado_em: i.adicionado_em || createdDate,
+  }));
+  rs.justificativa = reqObj.justificativa || "";
+  persistRequestDraft(rs);
+}
+
+function resetRequestEditorToBlank(rs) {
+  rs.activeId = null;
+  rs.activeCreatedAt = "";
+  rs.mode = "blank";
+  rs.dirty = false;
+  rs.orientador = "";
+  rs.laboratorio = "LSEE";
+  rs.data_solicitacao = new Date().toISOString().slice(0, 10);
+  rs.blankDate = false;
+  rs.items = [emptyRequestItem(), emptyRequestItem(), emptyRequestItem()];
+  rs.justificativa = "";
+  persistRequestDraft(rs);
+}
+
+function hydrateRequestsFromHistory(rs, history) {
+  if (rs.hydrated) return;
+  const saved = readSavedRequestDraft();
+  if (saved && saved.mode === "blank") {
+    if (saved.dirty) {
+      applyDraftDataToState(rs, saved, "blank", null);
+    } else {
+      resetRequestEditorToBlank(rs);
+    }
+  } else if (saved && saved.mode === "active" && saved.activeId) {
+    const match = history.find((x) => x.id === Number(saved.activeId));
+    if (match) {
+      if (saved.dirty) {
+        applyDraftDataToState(rs, saved, "active", match);
+      } else {
+        applySavedRequestToState(rs, match);
+      }
+    } else if (history.length) {
+      applySavedRequestToState(rs, history[0]);
+    }
+  } else if (saved && saved.dirty) {
+    applyDraftDataToState(rs, saved, "blank", null);
+  } else if (history.length) {
+    applySavedRequestToState(rs, history[0]);
+  }
+  rs.hydrated = true;
+}
+
 function buildRequestPreviewHtml(rs) {
   const filled = (rs.items || []).filter(
-    (it) => (it.material || "").trim() || (it.quantidade || "").trim() || (it.patrimonio || "").trim() || String(it.valor ?? "").trim()
+    (it) =>
+      (it.material || "").trim()
+      || (it.quantidade || "").trim()
+      || (it.patrimonio || "").trim()
+      || String(it.valor ?? "").trim()
+      || String(it.valor_unitario ?? "").trim()
   );
   const totalRows = Math.max(8, filled.length);
   let totalSum = 0;
@@ -3873,11 +4050,104 @@ function buildRequestApiPayload(rs) {
     items: (rs.items || []).map((it) => ({
       material: it.material || "",
       quantidade: it.quantidade || "",
+      valor_unitario: it.valor_unitario ?? "",
       patrimonio: it.patrimonio || "",
       valor: it.valor ?? "",
+      adicionado_em: it.adicionado_em || "",
     })),
     justificativa: rs.justificativa || "",
   };
+}
+
+function openSaveRequestModal(rs, history, onSaved) {
+  const defaultTargetId = rs.activeId && history.some((h) => h.id === Number(rs.activeId))
+    ? Number(rs.activeId)
+    : Number(history[0].id);
+
+  const optionLabel = (h) => {
+    const dt = fmtDateBrShort(h.created_at) || "Sem data";
+    const ori = h.orientador || "Sem orientador";
+    const summary = (h.items || []).slice(0, 2).map((i) => i.material).join(", ");
+    const extra = (h.items || []).length > 2 ? ` +${(h.items || []).length - 2}` : "";
+    return `#${h.id} · ${dt} · ${ori} (${summary}${extra})`;
+  };
+
+  openModal("Salvar Solicitação no Histórico", `
+    <p class="help-intro" style="margin-top:0;">
+      Escolha se deseja incorporar estes itens a uma solicitação já salva ou criar uma nova solicitação no histórico:
+    </p>
+    <label class="req-save-choice">
+      <input type="radio" name="req-save-mode" value="incorporate" checked />
+      <div style="flex:1;min-width:0;">
+        <strong>Incorporar / Atualizar solicitação já salva</strong>
+        <div style="margin-top:6px;">
+          <select id="req-save-target" class="select" style="width:100%;">
+            ${history.map((h) => `<option value="${h.id}" ${h.id === defaultTargetId ? "selected" : ""}>${esc(optionLabel(h))}</option>`).join("")}
+          </select>
+        </div>
+        <p id="req-save-target-hint" class="muted" style="font-size:0.78rem;margin:6px 0 0;"></p>
+      </div>
+    </label>
+    <label class="req-save-choice">
+      <input type="radio" name="req-save-mode" value="new" />
+      <div>
+        <strong>Criar nova solicitação no histórico</strong>
+        <p class="muted" style="font-size:0.78rem;margin:4px 0 0;">
+          Salva como um novo registro separado com a data de hoje.
+        </p>
+      </div>
+    </label>
+    <div class="form-actions">
+      <button class="btn btn-secondary" type="button" onclick="closeModal()">Cancelar</button>
+      <button id="btn-req-confirm-save" class="btn btn-primary" type="button">Salvar</button>
+    </div>
+  `);
+
+  const targetSel = document.getElementById("req-save-target");
+  const hintEl = document.getElementById("req-save-target-hint");
+  const updateHint = () => {
+    const mode = document.querySelector('input[name="req-save-mode"]:checked')?.value || "incorporate";
+    targetSel.disabled = mode !== "incorporate";
+    const tid = Number(targetSel.value);
+    if (rs.activeId && tid === Number(rs.activeId)) {
+      hintEl.textContent = `Atualiza a solicitação ativa #${tid}: mantém a data original da solicitação e dos itens já salvos, registrando a data de hoje apenas nos novos itens.`;
+    } else {
+      hintEl.textContent = `Incorpora os itens preenchidos agora ao final da solicitação #${tid}, preservando os itens antigos e suas datas originais (máx. 15 itens).`;
+    }
+  };
+  document.querySelectorAll('input[name="req-save-mode"]').forEach((r) => r.addEventListener("change", updateHint));
+  targetSel.addEventListener("change", updateHint);
+  updateHint();
+
+  document.getElementById("btn-req-confirm-save").addEventListener("click", async () => {
+    const mode = document.querySelector('input[name="req-save-mode"]:checked')?.value || "incorporate";
+    const basePayload = buildRequestApiPayload(rs);
+    try {
+      let res;
+      if (mode === "new") {
+        res = await apiFetch("/api/admin/requests", {
+          method: "POST",
+          body: JSON.stringify({ ...basePayload, reset_item_dates: true }),
+        });
+        showToast("Nova solicitação salva no histórico!");
+      } else {
+        const targetId = Number(targetSel.value);
+        const mergeMode = rs.activeId && targetId === Number(rs.activeId) ? "replace" : "append";
+        res = await apiFetch(`/api/admin/requests/${targetId}`, {
+          method: "PUT",
+          body: JSON.stringify({ ...basePayload, merge_mode: mergeMode }),
+        });
+        showToast(`Solicitação #${targetId} atualizada no histórico!`);
+      }
+      if (res?.request) {
+        applySavedRequestToState(rs, res.request);
+      }
+      closeModal();
+      onSaved();
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  });
 }
 
 async function renderRequests() {
@@ -3886,13 +4156,38 @@ async function renderRequests() {
   const rs = state.requests;
   rs.equipmentOptions = data.equipment_options || [];
   const history = data.items || [];
+  hydrateRequestsFromHistory(rs, history);
+
+  const renderItemDatePill = (it) => {
+    if (it.adicionado_em) {
+      return `<span class="req-item-date-pill" title="Data em que este item foi adicionado ao histórico">Adic. em ${esc(fmtDateBrShort(it.adicionado_em))}</span>`;
+    }
+    const hasData = (it.material || "").trim() || String(it.valor ?? "").trim() || String(it.valor_unitario ?? "").trim();
+    if (hasData) {
+      return `<span class="req-item-date-pill is-new" title="Ao salvar no histórico receberá a data de hoje">Novo item (data ao salvar)</span>`;
+    }
+    return `<span class="req-item-date-pill is-new" style="opacity:0.55;">Sem data</span>`;
+  };
 
   const renderItemRow = (it, idx) => `
     <div class="req-item-card js-req-item-row" data-idx="${idx}">
       <div class="req-item-grid">
-        <input class="input js-req-mat" data-idx="${idx}" placeholder="Descrição do material (ex.: Toner HP, Cabo HDMI)" value="${esc(it.material)}" />
-        <input class="input js-req-qtd" data-idx="${idx}" placeholder="Qtd." value="${esc(it.quantidade)}" />
-        <input class="input js-req-val" data-idx="${idx}" placeholder="Valor R$" value="${esc(it.valor ?? "")}" title="Valor total deste item em R$" />
+        <div class="req-cell">
+          <span class="req-mini-lbl">Material</span>
+          <input class="input js-req-mat" data-idx="${idx}" placeholder="Descrição (ex.: Toner HP, Cabo HDMI)" value="${esc(it.material)}" />
+        </div>
+        <div class="req-cell">
+          <span class="req-mini-lbl">Qtd.</span>
+          <input class="input js-req-qtd" data-idx="${idx}" placeholder="Ex.: 2" value="${esc(it.quantidade)}" />
+        </div>
+        <div class="req-cell">
+          <span class="req-mini-lbl" title="Oculto na prévia e nos documentos exportados; calcula Valor R$">Unit. R$ <em class="req-hidden-tag">(oculto)</em></span>
+          <input class="input js-req-unit" data-idx="${idx}" placeholder="Ex.: 50,00" value="${esc(it.valor_unitario ?? "")}" title="Valor unitário em R$ (não aparece no documento; multiplica pela quantidade)" />
+        </div>
+        <div class="req-cell">
+          <span class="req-mini-lbl">Valor R$</span>
+          <input class="input js-req-val" data-idx="${idx}" placeholder="Auto / R$" value="${esc(it.valor ?? "")}" title="Valor total deste item em R$ (calculado ou manual)" />
+        </div>
         <button class="btn btn-sm btn-danger js-req-del-row" data-idx="${idx}" type="button" title="Remover item">&times;</button>
       </div>
       <div class="req-item-subgrid">
@@ -3901,18 +4196,29 @@ async function renderRequests() {
           <option value="">-- Puxar patrimônio do inventário (opcional) --</option>
           ${rs.equipmentOptions.map((eq) => `<option value="${esc(eq.patrimonio)}">${esc(eq.label)}</option>`).join("")}
         </select>
+        ${renderItemDatePill(it)}
       </div>
     </div>
   `;
+
+  const activeBanner = rs.activeId
+    ? `<div class="req-active-banner">
+         <span>Solicitação ativa no editor: <strong>#${rs.activeId}</strong> (criada em ${esc(fmtDateBrShort(rs.activeCreatedAt))})</span>
+         ${rs.dirty ? '<span class="muted">Alterações não salvas</span>' : ""}
+       </div>`
+    : `<div class="req-active-banner" style="color:var(--text-muted);background:var(--surface-alt);border-color:var(--border);">
+         <span>Nova solicitação em preenchimento (ainda não salva no histórico)</span>
+       </div>`;
 
   el.innerHTML = `
     <div class="requests-layout">
       <div class="card">
         <div class="card-header">
           <h2 class="card-title">Criar Solicitação de Material (EESC / USP)</h2>
-          <button id="btn-req-clear" class="btn btn-secondary btn-sm" type="button">Limpar</button>
+          <button id="btn-req-clear" class="btn btn-secondary btn-sm" type="button">Limpar / Nova Solicitação</button>
         </div>
         <div class="card-body">
+          ${activeBanner}
           <div class="form-grid" style="margin-bottom:10px;">
             <div class="form-field">
               <label for="req-orientador">Orientador</label>
@@ -3972,18 +4278,24 @@ async function renderRequests() {
                 <th>Criado em</th>
                 <th>Orientador</th>
                 <th>Laboratório</th>
-                <th>Itens</th>
+                <th>Itens (com data de inclusão)</th>
                 <th>Total</th>
                 <th>Ações</th>
               </tr>
             </thead>
             <tbody>
-              ${history.map((h) => `
+              ${history.map((h) => {
+                const itemsHtml = (h.items || []).map((i) => {
+                  const dt = fmtDateBrShort(i.adicionado_em || (h.created_at || "").slice(0, 10));
+                  return `<span class="req-hist-item-chip">${esc(i.material)}${dt ? ` <span class="req-hist-item-date">(${esc(dt)})</span>` : ""}</span>`;
+                }).join("; ") || "—";
+                const isActive = rs.activeId && Number(rs.activeId) === Number(h.id);
+                return `
                 <tr>
-                  <td class="mono">${esc((h.created_at || "").slice(0, 10))}</td>
+                  <td class="mono">#${h.id} · ${esc(fmtDateBrShort(h.created_at) || "—")} ${isActive ? '<span class="badge badge-public">Ativa</span>' : ""}</td>
                   <td>${esc(h.orientador || "—")}</td>
                   <td>${esc(h.laboratorio || "—")}</td>
-                  <td>${esc((h.items || []).map((i) => i.material).join("; ") || "—")}</td>
+                  <td>${itemsHtml}</td>
                   <td class="mono">${h.total_valor !== null && h.total_valor !== undefined ? esc(fmtBrlJs(Number(h.total_valor))) : "—"}</td>
                   <td>
                     <span class="row-actions">
@@ -3994,7 +4306,8 @@ async function renderRequests() {
                     </span>
                   </td>
                 </tr>
-              `).join("") || '<tr><td colspan="6" class="muted">Nenhuma solicitação salva ainda.</td></tr>'}
+              `;
+              }).join("") || '<tr><td colspan="6" class="muted">Nenhuma solicitação salva ainda.</td></tr>'}
             </tbody>
           </table>
         </div>
@@ -4007,50 +4320,74 @@ async function renderRequests() {
     if (slot) slot.innerHTML = buildRequestPreviewHtml(rs);
   };
 
+  const markChanged = () => {
+    rs.dirty = true;
+    persistRequestDraft(rs);
+    refreshPreview();
+  };
+
   document.getElementById("req-orientador").addEventListener("input", (e) => {
     rs.orientador = e.target.value;
-    refreshPreview();
+    markChanged();
   });
   document.getElementById("req-laboratorio").addEventListener("input", (e) => {
     rs.laboratorio = e.target.value;
-    refreshPreview();
+    markChanged();
   });
   document.getElementById("req-date").addEventListener("change", (e) => {
     rs.data_solicitacao = e.target.value;
-    refreshPreview();
+    markChanged();
   });
   document.getElementById("req-blank-date").addEventListener("change", (e) => {
     rs.blankDate = Boolean(e.target.checked);
     document.getElementById("req-date").disabled = rs.blankDate;
-    refreshPreview();
+    markChanged();
   });
   document.getElementById("req-just").addEventListener("input", (e) => {
     rs.justificativa = e.target.value;
-    refreshPreview();
+    markChanged();
   });
 
   el.querySelectorAll(".js-req-mat").forEach((inp) => {
     inp.addEventListener("input", () => {
       rs.items[Number(inp.dataset.idx)].material = inp.value;
-      refreshPreview();
+      markChanged();
     });
   });
   el.querySelectorAll(".js-req-qtd").forEach((inp) => {
     inp.addEventListener("input", () => {
-      rs.items[Number(inp.dataset.idx)].quantidade = inp.value;
-      refreshPreview();
+      const idx = Number(inp.dataset.idx);
+      const it = rs.items[idx];
+      it.quantidade = inp.value;
+      if (recalcRequestItemTotal(it)) {
+        const valInp = el.querySelector(`.js-req-val[data-idx="${idx}"]`);
+        if (valInp) valInp.value = it.valor;
+      }
+      markChanged();
+    });
+  });
+  el.querySelectorAll(".js-req-unit").forEach((inp) => {
+    inp.addEventListener("input", () => {
+      const idx = Number(inp.dataset.idx);
+      const it = rs.items[idx];
+      it.valor_unitario = inp.value;
+      if (recalcRequestItemTotal(it)) {
+        const valInp = el.querySelector(`.js-req-val[data-idx="${idx}"]`);
+        if (valInp) valInp.value = it.valor;
+      }
+      markChanged();
     });
   });
   el.querySelectorAll(".js-req-val").forEach((inp) => {
     inp.addEventListener("input", () => {
       rs.items[Number(inp.dataset.idx)].valor = inp.value;
-      refreshPreview();
+      markChanged();
     });
   });
   el.querySelectorAll(".js-req-pat").forEach((inp) => {
     inp.addEventListener("input", () => {
       rs.items[Number(inp.dataset.idx)].patrimonio = inp.value;
-      refreshPreview();
+      markChanged();
     });
   });
   el.querySelectorAll(".js-req-pat-pick").forEach((sel) => {
@@ -4061,16 +4398,18 @@ async function renderRequests() {
       rs.items[idx].patrimonio = val;
       const patInp = el.querySelector(`.js-req-pat[data-idx="${idx}"]`);
       if (patInp) patInp.value = val;
-      refreshPreview();
+      markChanged();
     });
   });
   el.querySelectorAll(".js-req-del-row").forEach((btn) => {
     btn.addEventListener("click", () => {
       if (rs.items.length <= 1) {
-        rs.items[0] = { material: "", quantidade: "", patrimonio: "", valor: "" };
+        rs.items[0] = emptyRequestItem();
       } else {
         rs.items.splice(Number(btn.dataset.idx), 1);
       }
+      rs.dirty = true;
+      persistRequestDraft(rs);
       renderRequests();
     });
   });
@@ -4080,21 +4419,15 @@ async function renderRequests() {
       showToast("Máximo de 15 itens por solicitação.", true);
       return;
     }
-    rs.items.push({ material: "", quantidade: "", patrimonio: "", valor: "" });
+    rs.items.push(emptyRequestItem());
+    rs.dirty = true;
+    persistRequestDraft(rs);
     renderRequests();
   });
 
   document.getElementById("btn-req-clear").addEventListener("click", () => {
-    rs.orientador = "";
-    rs.laboratorio = "LSEE";
-    rs.data_solicitacao = new Date().toISOString().slice(0, 10);
-    rs.blankDate = false;
-    rs.items = [
-      { material: "", quantidade: "", patrimonio: "", valor: "" },
-      { material: "", quantidade: "", patrimonio: "", valor: "" },
-      { material: "", quantidade: "", patrimonio: "", valor: "" },
-    ];
-    rs.justificativa = "";
+    resetRequestEditorToBlank(rs);
+    rs.hydrated = true;
     renderRequests();
   });
 
@@ -4109,16 +4442,33 @@ async function renderRequests() {
   };
 
   document.getElementById("btn-req-save").addEventListener("click", async () => {
-    try {
-      await apiFetch("/api/admin/requests", {
-        method: "POST",
-        body: JSON.stringify(buildRequestApiPayload(rs)),
-      });
-      showToast("Solicitação salva no histórico!");
-      renderRequests();
-    } catch (err) {
-      showToast(err.message, true);
+    const hasAnyInput = (rs.items || []).some(
+      (it) =>
+        (it.material || "").trim()
+        || (it.quantidade || "").trim()
+        || (it.patrimonio || "").trim()
+        || String(it.valor ?? "").trim()
+        || String(it.valor_unitario ?? "").trim()
+    ) || (rs.justificativa || "").trim() || (rs.orientador || "").trim();
+    if (!hasAnyInput) {
+      showToast("Preencha ao menos um item de material antes de gerar ou salvar.", true);
+      return;
     }
+    if (!history.length) {
+      try {
+        const res = await apiFetch("/api/admin/requests", {
+          method: "POST",
+          body: JSON.stringify(buildRequestApiPayload(rs)),
+        });
+        if (res?.request) applySavedRequestToState(rs, res.request);
+        showToast("Solicitação salva no histórico!");
+        renderRequests();
+      } catch (err) {
+        showToast(err.message, true);
+      }
+      return;
+    }
+    openSaveRequestModal(rs, history, () => renderRequests());
   });
   document.getElementById("btn-req-pdf").addEventListener("click", () => exportReq("pdf"));
   document.getElementById("btn-req-docx").addEventListener("click", () => exportReq("docx"));
@@ -4127,19 +4477,10 @@ async function renderRequests() {
     btn.addEventListener("click", () => {
       const h = history.find((x) => x.id === Number(btn.dataset.id));
       if (!h) return;
-      rs.orientador = h.orientador || "";
-      rs.laboratorio = h.laboratorio || "";
-      rs.data_solicitacao = h.data_solicitacao || "";
-      rs.blankDate = !h.data_solicitacao;
-      rs.items = (h.items && h.items.length ? h.items : [{ material: "", quantidade: "", patrimonio: "", valor: "" }]).map((i) => ({
-        material: i.material || "",
-        quantidade: i.quantidade || "",
-        patrimonio: i.patrimonio || "",
-        valor: i.valor !== null && i.valor !== undefined ? String(i.valor) : "",
-      }));
-      rs.justificativa = h.justificativa || "";
+      applySavedRequestToState(rs, h);
+      rs.hydrated = true;
       renderRequests();
-      showToast("Solicitação carregada no editor.");
+      showToast(`Solicitação #${h.id} carregada no editor.`);
     });
   });
   el.querySelectorAll(".js-req-hist-pdf").forEach((btn) => {
@@ -4156,8 +4497,12 @@ async function renderRequests() {
   });
   el.querySelectorAll(".js-req-hist-del").forEach((btn) => {
     btn.addEventListener("click", async () => {
+      const delId = Number(btn.dataset.id);
       if (!confirm("Remover esta solicitação do histórico?")) return;
-      await apiFetch(`/api/admin/requests/${btn.dataset.id}`, { method: "DELETE" });
+      await apiFetch(`/api/admin/requests/${delId}`, { method: "DELETE" });
+      if (rs.activeId && Number(rs.activeId) === delId) {
+        resetRequestEditorToBlank(rs);
+      }
       showToast("Solicitação removida.");
       renderRequests();
     });
@@ -4362,7 +4707,7 @@ function openAdminHelpModal() {
       tab: "solicitacoes",
       title: "11. Solicitações",
       items: [
-        "Gere solicitações oficiais EESC/USP de material de consumo com preenchimento automático de patrimônio, histórico e exportação em PDF ou Word (.docx)."
+        "Gere solicitações oficiais EESC/USP com campo de Valor Unitário oculto no documento (cálculo automático do total), rascunho persistente ao recarregar, data por item no histórico, incorporação/criação via pop-up e exportação em PDF ou Word (.docx)."
       ]
     },
     {

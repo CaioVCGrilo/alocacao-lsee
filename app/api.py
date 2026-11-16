@@ -26,7 +26,12 @@ from .db import DEFAULT_USAGE_RULES, db_session, ensure_default_map_stations
 from .importer import import_xlsx_into_db
 from .labels import build_labels_docx, build_labels_pdf, normalize_label_pages
 from .network_excel import build_network_xlsx, parse_network_xlsx
-from .requests_doc import build_request_docx, build_request_pdf, normalize_material_request
+from .requests_doc import (
+    build_request_docx,
+    build_request_pdf,
+    incorporate_material_request,
+    normalize_material_request,
+)
 from .scoring import build_score_summary, compute_state, simulate_upgrade
 
 
@@ -695,6 +700,46 @@ def _handle_network_import_xlsx(conn: Any, body: Dict[str, Any]) -> Dict[str, An
     }
 
 
+def _format_material_request_row(r: Any) -> Dict[str, Any]:
+    d = dict(r)
+    fallback_date = str(d.get("created_at") or "")[:10]
+    try:
+        raw_items = json.loads(d.get("items_json") or "[]")
+    except Exception:
+        raw_items = []
+    items = []
+    if isinstance(raw_items, list):
+        for it in raw_items:
+            if not isinstance(it, dict):
+                continue
+            item_copy = dict(it)
+            if not item_copy.get("adicionado_em") and fallback_date:
+                item_copy["adicionado_em"] = fallback_date
+            items.append(item_copy)
+    return {
+        "id": d["id"],
+        "created_at": d["created_at"],
+        "orientador": d.get("orientador") or "",
+        "laboratorio": d.get("laboratorio") or "",
+        "data_solicitacao": d.get("data_solicitacao") or "",
+        "items": items,
+        "total_valor": d.get("total_valor"),
+        "justificativa": d.get("justificativa") or "",
+    }
+
+
+def _fetch_material_request_row(conn: Any, req_id: int) -> Any:
+    return conn.execute(
+        """
+        SELECT id, created_at, orientador, laboratorio, data_solicitacao,
+               items_json, total_valor, justificativa
+        FROM material_requests
+        WHERE id = ?
+        """,
+        (req_id,),
+    ).fetchone()
+
+
 def _get_requests_payload(conn: Any) -> Dict[str, Any]:
     rows = conn.execute(
         """
@@ -705,24 +750,7 @@ def _get_requests_payload(conn: Any) -> Dict[str, Any]:
         LIMIT 50
         """
     ).fetchall()
-    history = []
-    for r in rows:
-        try:
-            items = json.loads(r["items_json"] or "[]")
-        except Exception:
-            items = []
-        history.append(
-            {
-                "id": r["id"],
-                "created_at": r["created_at"],
-                "orientador": r["orientador"] or "",
-                "laboratorio": r["laboratorio"] or "",
-                "data_solicitacao": r["data_solicitacao"] or "",
-                "items": items,
-                "total_valor": r["total_valor"],
-                "justificativa": r["justificativa"] or "",
-            }
-        )
+    history = [_format_material_request_row(r) for r in rows]
 
     pc_opts = conn.execute(
         "SELECT id_pc, patrimonio, tipo_de_uso, localizacao FROM computers WHERE id_pc IS NOT NULL ORDER BY id_pc"
@@ -1689,7 +1717,18 @@ class LSEEController:
                 return
 
             if path == "/api/admin/requests":
-                req = normalize_material_request(body)
+                payload = body
+                if body.get("reset_item_dates") and isinstance(body.get("items"), list):
+                    payload = {
+                        **body,
+                        "items": [
+                            {k: v for k, v in it.items() if k != "adicionado_em"}
+                            if isinstance(it, dict)
+                            else it
+                            for it in body["items"]
+                        ],
+                    }
+                req = normalize_material_request(payload, default_item_date=_today_str())
                 now = _now_iso()
                 cur = conn.execute(
                     """
@@ -1714,7 +1753,11 @@ class LSEEController:
                     f"req#{cur.lastrowid}",
                     f"{len(req['items'])} itens · Total={req['total_fmt'] or '-'}",
                 )
-                self._send_json({"ok": True, "id": cur.lastrowid}, status=HTTPStatus.CREATED)
+                saved = _fetch_material_request_row(conn, int(cur.lastrowid))
+                self._send_json(
+                    {"ok": True, "id": cur.lastrowid, "request": _format_material_request_row(saved)},
+                    status=HTTPStatus.CREATED,
+                )
                 return
 
             if path in ("/api/admin/requests/pdf", "/api/admin/requests/docx"):
@@ -1872,6 +1915,40 @@ class LSEEController:
                 )
                 _log_audit(conn, "UPDATE_NETWORK", f"row#{net_pk}", "Registro de rede atualizado")
                 self._send_json({"ok": True})
+                return
+
+            if path.startswith("/api/admin/requests/"):
+                req_pk = int(path.split("/")[4])
+                existing = _fetch_material_request_row(conn, req_pk)
+                if not existing:
+                    self._send_json({"error": "Solicitação não encontrada."}, status=HTTPStatus.NOT_FOUND)
+                    return
+                req = incorporate_material_request(dict(existing), body, _today_str())
+                conn.execute(
+                    """
+                    UPDATE material_requests
+                    SET orientador = ?, laboratorio = ?, data_solicitacao = ?,
+                        items_json = ?, total_valor = ?, justificativa = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        req["orientador"],
+                        req["laboratorio"],
+                        req["data_solicitacao"],
+                        json.dumps(req["items"], ensure_ascii=False),
+                        req["total_valor"],
+                        req["justificativa"],
+                        req_pk,
+                    ),
+                )
+                _log_audit(
+                    conn,
+                    "UPDATE_MATERIAL_REQUEST",
+                    f"req#{req_pk}",
+                    f"{len(req['items'])} itens · Total={req['total_fmt'] or '-'}",
+                )
+                updated = _fetch_material_request_row(conn, req_pk)
+                self._send_json({"ok": True, "id": req_pk, "request": _format_material_request_row(updated)})
                 return
 
             if path.startswith("/api/admin/map/stations/"):

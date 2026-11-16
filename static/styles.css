@@ -1555,17 +1555,95 @@ tbody tr:hover {
 
 .req-item-grid {
   display: grid;
-  grid-template-columns: 1fr 84px 108px 34px;
+  grid-template-columns: minmax(140px, 1fr) 74px 98px 98px 34px;
   gap: 6px;
-  align-items: center;
+  align-items: end;
+}
+
+.req-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.req-mini-lbl {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.req-hidden-tag {
+  font-style: normal;
+  font-weight: 500;
+  color: #64748b;
+  font-size: 0.66rem;
 }
 
 .req-item-subgrid {
   display: grid;
-  grid-template-columns: 140px 1fr;
+  grid-template-columns: 132px 1fr auto;
   gap: 6px;
   margin-top: 6px;
   align-items: center;
+}
+
+.req-item-date-pill {
+  font-size: 0.72rem;
+  color: #334155;
+  background: #e2e8f0;
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.req-item-date-pill.is-new {
+  color: #0f766e;
+  background: #ccfbf1;
+}
+
+.req-active-banner {
+  font-size: 0.78rem;
+  color: var(--primary);
+  background: rgba(27, 54, 93, 0.08);
+  border: 1px solid rgba(27, 54, 93, 0.18);
+  border-radius: 6px;
+  padding: 5px 10px;
+  margin-bottom: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.req-save-choice {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  cursor: pointer;
+  background: var(--surface-alt);
+}
+
+.req-save-choice:has(input:checked) {
+  border-color: var(--primary);
+  background: rgba(27, 54, 93, 0.05);
+}
+
+.req-hist-item-chip {
+  display: inline-block;
+  margin: 1px 4px 1px 0;
+}
+
+.req-hist-item-date {
+  color: var(--text-muted);
+  font-size: 0.78em;
 }
 
 .req-paper-preview {
@@ -1670,6 +1748,13 @@ tbody tr:hover {
 @media (max-width: 1040px) {
   .labels-layout,
   .requests-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .req-item-grid,
+  .req-item-subgrid {
     grid-template-columns: 1fr;
   }
 }

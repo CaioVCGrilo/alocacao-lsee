@@ -65,6 +65,34 @@ def _parse_money(raw: Any) -> Optional[float]:
     return v
 
 
+def _parse_qty_number(raw: Any) -> Optional[float]:
+    s = " ".join(str(raw or "").strip().split())
+    if not s:
+        return None
+    m = re.match(r"^(\d+(?:[.,]\d+)?)", s)
+    if not m:
+        return None
+    try:
+        v = float(m.group(1).replace(",", "."))
+    except ValueError:
+        return None
+    return v if v >= 0 else None
+
+
+def _recompute_total(items: List[Dict[str, Any]]) -> Tuple[Optional[float], str]:
+    total = 0.0
+    has_any_price = False
+    for it in items:
+        v = it.get("valor")
+        if v is not None:
+            has_any_price = True
+            total += float(v)
+    if not has_any_price:
+        return None, ""
+    rounded = round(total, 2)
+    return rounded, format_brl(rounded)
+
+
 def format_brl(val: Optional[float]) -> str:
     if val is None:
         return ""
@@ -84,7 +112,10 @@ def format_request_date(raw_date: str) -> str:
     return f"São Carlos, {s}"
 
 
-def normalize_material_request(body: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_material_request(
+    body: Dict[str, Any],
+    default_item_date: Optional[str] = None,
+) -> Dict[str, Any]:
     orientador = str(body.get("orientador") or "").strip()
     laboratorio = str(body.get("laboratorio") or "").strip()
     data_solicitacao = str(body.get("data_solicitacao") or "").strip()
@@ -97,31 +128,43 @@ def normalize_material_request(body: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError(f"Máximo de {MAX_TABLE_ROWS} itens por solicitação.")
 
     items: List[Dict[str, Any]] = []
-    total = 0.0
-    has_any_price = False
     for row in raw_items:
         if not isinstance(row, dict):
             raise ValueError("Item de material inválido.")
         mat = str(row.get("material") or "").strip()
         qtd = str(row.get("quantidade") or "").strip()
         pat = str(row.get("patrimonio") or "").strip()
+        unit_num = _parse_money(row.get("valor_unitario"))
         val_num = _parse_money(row.get("valor"))
-        if not mat and not qtd and not pat and val_num is None:
+        if val_num is None and unit_num is not None:
+            qty_num = _parse_qty_number(qtd)
+            if qty_num is not None:
+                val_num = round(unit_num * qty_num, 2)
+
+        raw_item_date = str(row.get("adicionado_em") or "").strip()
+        item_date = (
+            raw_item_date
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", raw_item_date)
+            else (default_item_date or "")
+        )
+
+        if not mat and not qtd and not pat and val_num is None and unit_num is None:
             continue
         if not mat:
             raise ValueError("Informe a descrição do material em todas as linhas preenchidas.")
-        if val_num is not None:
-            has_any_price = True
-            total += val_num
-        items.append(
-            {
-                "material": mat,
-                "quantidade": qtd,
-                "patrimonio": pat,
-                "valor": val_num,
-                "valor_fmt": format_brl(val_num),
-            }
-        )
+
+        item_obj: Dict[str, Any] = {
+            "material": mat,
+            "quantidade": qtd,
+            "patrimonio": pat,
+            "valor": round(val_num, 2) if val_num is not None else None,
+            "valor_fmt": format_brl(val_num),
+        }
+        if unit_num is not None:
+            item_obj["valor_unitario"] = round(unit_num, 2)
+        if item_date:
+            item_obj["adicionado_em"] = item_date
+        items.append(item_obj)
 
     if not items and not justificativa and not orientador:
         raise ValueError("Preencha ao menos um item de material antes de gerar ou salvar.")
@@ -131,16 +174,77 @@ def normalize_material_request(body: Dict[str, Any]) -> Dict[str, Any]:
         if len(data_solicitacao) > 60:
             raise ValueError("Data inválida.")
 
+    total_valor, total_fmt = _recompute_total(items)
     return {
         "orientador": orientador,
         "laboratorio": laboratorio,
         "data_solicitacao": data_solicitacao,
         "data_texto": format_request_date(data_solicitacao),
         "items": items,
-        "total_valor": round(total, 2) if has_any_price else None,
-        "total_fmt": format_brl(total) if has_any_price else "",
+        "total_valor": total_valor,
+        "total_fmt": total_fmt,
         "justificativa": justificativa,
     }
+
+
+def incorporate_material_request(
+    existing_row: Dict[str, Any],
+    body: Dict[str, Any],
+    today_str: str,
+) -> Dict[str, Any]:
+    """Atualiza uma solicitação salva preservando as datas originais dos itens existentes."""
+    import json
+
+    fallback_date = str(existing_row.get("created_at") or "")[:10]
+    try:
+        raw_existing_items = json.loads(existing_row.get("items_json") or "[]")
+    except Exception:
+        raw_existing_items = []
+
+    existing_items: List[Dict[str, Any]] = []
+    if isinstance(raw_existing_items, list):
+        for it in raw_existing_items:
+            if not isinstance(it, dict):
+                continue
+            item_copy = dict(it)
+            if not item_copy.get("adicionado_em") and re.match(r"^\d{4}-\d{2}-\d{2}$", fallback_date):
+                item_copy["adicionado_em"] = fallback_date
+            if item_copy.get("valor") is not None and not item_copy.get("valor_fmt"):
+                item_copy["valor_fmt"] = format_brl(float(item_copy["valor"]))
+            existing_items.append(item_copy)
+
+    merge_mode = str(body.get("merge_mode") or "replace").strip().lower()
+    if merge_mode == "append":
+        new_req = normalize_material_request(body, default_item_date=today_str)
+        combined = existing_items + new_req["items"]
+        if len(combined) > MAX_TABLE_ROWS:
+            raise ValueError(
+                f"A solicitação combinada teria {len(combined)} itens (máximo: {MAX_TABLE_ROWS} por formulário)."
+            )
+        orientador = str(existing_row.get("orientador") or "").strip() or new_req["orientador"]
+        laboratorio = str(existing_row.get("laboratorio") or "").strip() or new_req["laboratorio"]
+        data_sol = str(existing_row.get("data_solicitacao") or "").strip() or new_req["data_solicitacao"]
+        ex_just = str(existing_row.get("justificativa") or "").strip()
+        nw_just = new_req["justificativa"]
+        if not nw_just or nw_just in ex_just:
+            justificativa = ex_just
+        elif not ex_just:
+            justificativa = nw_just
+        else:
+            justificativa = f"{ex_just}\n{nw_just}"
+        total_valor, total_fmt = _recompute_total(combined)
+        return {
+            "orientador": orientador,
+            "laboratorio": laboratorio,
+            "data_solicitacao": data_sol,
+            "data_texto": format_request_date(data_sol),
+            "items": combined,
+            "total_valor": total_valor,
+            "total_fmt": total_fmt,
+            "justificativa": justificativa,
+        }
+
+    return normalize_material_request(body, default_item_date=today_str)
 
 
 def _load_pdf_fonts() -> Tuple[pymupdf.Font, pymupdf.Font]:
