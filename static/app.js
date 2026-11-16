@@ -335,7 +335,7 @@ async function openScoreInfoModal() {
       </p>
       <ul class="score-summary-list">
         <li>
-          <strong>Processador (${esc(pCpu)}%):</strong> compara a velocidade do processador com o melhor PC Individual ativo do laboratório (que recebe nota 10).
+          <strong>Processador (${esc(pCpu)}%):</strong> compara a velocidade do processador com o melhor PC ativo do laboratório, incluindo a Sala do Servidor / RTDS (que recebe nota 10).
         </li>
         <li>
           <strong>Memória RAM (${esc(pRam)}%):</strong> usa faixas por capacidade instalada (ex.: 8 GB = 5, 16 GB = 8, 32 GB = 9, 64 GB = 10).
@@ -344,7 +344,7 @@ async function openScoreInfoModal() {
           <strong>Armazenamento (${esc(pArm)}%):</strong>
           junta SSD e HD em uma <strong>Capacidade Equivalente</strong> onde o HD vale <strong>${esc(pesoHdPct)}%</strong> do SSD
           (<span class="mono">GB_eq = SSD + ${esc(info.armaz_peso_hd)} × HD</span>).
-          Essa soma segue uma curva suave até a nota <strong>10</strong>, hoje definida pelo melhor armazenamento entre os PCs Individuais ativos:
+          Essa soma segue uma curva suave até a nota <strong>10</strong>, hoje definida pelo melhor armazenamento entre os PCs ativos (incluindo Sala do Servidor / RTDS):
           <strong class="mono">${esc(info.arm_ref)} GB eq.</strong>${esc(refPcs)}.
           <br /><span class="muted">Assim, ter só um SSD pequeno + HD comum não dá nota 10 fácil, e SSDs grandes (como 1 TB) não ficam atrás de combos menores.</span>
         </li>

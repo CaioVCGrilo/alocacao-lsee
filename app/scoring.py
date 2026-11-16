@@ -67,6 +67,7 @@ def build_arm_examples(rules: Dict[str, Any], arm_ref: float) -> List[Dict[str, 
         ("SSD 480 GB + HD 1 TB", 480.0, 1000.0),
         ("SSD 1 TB (sem HD)", 1000.0, 0.0),
         ("SSD 1 TB + HD 1 TB", 1000.0, 1000.0),
+        ("SSD 1 TB + HD 4 TB", 1000.0, 4000.0),
     ]
     out = []
     for label, ssd_gb, hd_gb in samples:
@@ -177,6 +178,15 @@ def _build_allocation_index(conn: Any) -> Dict[str, Any]:
     }
 
 
+def _is_reference_pc(id_pc: str, tipo: str, localizacao: str, status: str) -> bool:
+    """Elegibilidade para referência de topo: PCs ativos individuais ou da sala do RTDS/Servidor."""
+    return (
+        bool(id_pc)
+        and status != "Despatrimoniado"
+        and (tipo in ("Individual", "Especial") or localizacao == "Sala do Servidor")
+    )
+
+
 def compute_state(conn: Any) -> Dict[str, Any]:
     """Calcula o estado completo e consistente do sistema a partir do banco."""
     rules = load_rules(conn)
@@ -225,13 +235,15 @@ def compute_state(conn: Any) -> Dict[str, Any]:
         else:
             status = ""
 
-        if tipo == "Individual" and status != "Despatrimoniado" and indice_cpu is not None:
+        localizacao = (pc["localizacao"] or "").strip()
+        ref_ok = _is_reference_pc(id_pc, tipo, localizacao, status)
+        if ref_ok and indice_cpu is not None:
             cpu_ref_candidates.append(indice_cpu)
 
         arm_eq: Optional[float] = None
         if ssd_gb is not None or hd_gb is not None:
             arm_eq = max(0.0, (ssd_gb or 0.0) + peso_hd * (hd_gb or 0.0))
-            if tipo == "Individual" and status != "Despatrimoniado" and arm_eq > 0:
+            if ref_ok and arm_eq > 0:
                 arm_ref_candidates.append((arm_eq, id_pc))
 
         pc["id_pc_clean"] = id_pc
