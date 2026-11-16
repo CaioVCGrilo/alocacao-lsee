@@ -314,7 +314,7 @@ def _create_admin_user_record(conn: Any, body: Dict[str, Any], creator_label: st
     if len(nusp) < 4 or len(nusp) > 15:
         raise ValueError("Número USP inválido (informe de 4 a 15 dígitos).")
     if len(nome) < 2:
-        raise ValueError("Informe o nome completo do administrador.")
+        raise ValueError("Informe o nome do administrador (ex.: Cleiton).")
     existing = conn.execute(
         "SELECT id FROM admin_users WHERE numero_usp = ?",
         (nusp,),
@@ -343,17 +343,41 @@ def _create_admin_user_record(conn: Any, body: Dict[str, Any], creator_label: st
     }
 
 
-def _update_admin_user_record(conn: Any, user_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+def _update_admin_user_record(
+    conn: Any,
+    user_id: int,
+    body: Dict[str, Any],
+    current_uid: int = 0,
+) -> Dict[str, Any]:
     row = conn.execute(
-        "SELECT id, numero_usp, nome, is_active FROM admin_users WHERE id = ?",
+        "SELECT id, numero_usp, nome, is_active, created_at, created_by FROM admin_users WHERE id = ?",
         (user_id,),
     ).fetchone()
     if not row:
         raise LookupError("Administrador não encontrado.")
-    nome = " ".join(str(body.get("nome") if "nome" in body else (row["nome"] or "")).split())
+
+    editing_profile = "nome" in body or "numero_usp" in body
+    if editing_profile and (current_uid <= 0 or user_id != current_uid):
+        raise PermissionError("Apenas o próprio administrador pode editar seu Número USP e nome.")
+
+    new_nusp = normalize_nusp(body["numero_usp"]) if "numero_usp" in body else str(row["numero_usp"] or "")
+    if len(new_nusp) < 4 or len(new_nusp) > 15:
+        raise ValueError("Número USP inválido (informe de 4 a 15 dígitos).")
+    if new_nusp != row["numero_usp"]:
+        dup = conn.execute(
+            "SELECT id FROM admin_users WHERE numero_usp = ? AND id != ?",
+            (new_nusp, user_id),
+        ).fetchone()
+        if dup:
+            raise ValueError("Este Número USP já está cadastrado para outro administrador.")
+
+    nome = " ".join(str(body["nome"]).split()) if "nome" in body else str(row["nome"] or "")
     if len(nome) < 2:
-        raise ValueError("Informe um nome válido para o administrador.")
+        raise ValueError("Informe um nome válido para o administrador (mínimo 2 caracteres).")
+
     active = bool(body.get("is_active")) if "is_active" in body else bool(int(row["is_active"] or 0))
+    if not active and current_uid > 0 and user_id == current_uid:
+        raise ValueError("Você não pode desativar o próprio usuário atualmente conectado.")
     if not active:
         other_cnt = conn.execute(
             "SELECT COUNT(*) AS cnt FROM admin_users WHERE is_active = 1 AND id != ?",
@@ -365,17 +389,34 @@ def _update_admin_user_record(conn: Any, user_id: int, body: Dict[str, Any]) -> 
             "UPDATE admin_sessions SET logged_out_at = ? WHERE user_id = ? AND (logged_out_at IS NULL OR logged_out_at = '')",
             (_now_iso(), user_id),
         )
+
     conn.execute(
-        "UPDATE admin_users SET nome = ?, is_active = ? WHERE id = ?",
-        (nome, 1 if active else 0, user_id),
+        "UPDATE admin_users SET numero_usp = ?, nome = ?, is_active = ? WHERE id = ?",
+        (new_nusp, nome, 1 if active else 0, user_id),
     )
+    if editing_profile:
+        conn.execute(
+            "UPDATE admin_sessions SET numero_usp = ?, nome = ? WHERE user_id = ? AND (logged_out_at IS NULL OR logged_out_at = '')",
+            (new_nusp, nome, user_id),
+        )
     _log_audit(
         conn,
         "UPDATE_ADMIN_USER",
-        f"NUSP {row['numero_usp']}",
+        f"NUSP {new_nusp}",
         f"{nome} ({'Ativo' if active else 'Inativo'})",
     )
-    return {"ok": True}
+    return {
+        "ok": True,
+        "item": {
+            "id": user_id,
+            "numero_usp": new_nusp,
+            "nome": nome,
+            "is_active": active,
+            "created_at": row["created_at"] or "",
+            "created_by": row["created_by"] or "",
+        },
+        "user": {"id": user_id, "numero_usp": new_nusp, "nome": nome},
+    }
 
 
 def _delete_admin_user_record(conn: Any, user_id: int, current_uid: int) -> Dict[str, Any]:
@@ -1385,6 +1426,8 @@ class LSEEController:
             self._send_json({"error": "Endpoint não encontrado."}, status=HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except PermissionError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.FORBIDDEN)
         except LookupError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
         except Exception as exc:
@@ -1407,6 +1450,8 @@ class LSEEController:
             self._send_json({"error": "Endpoint não encontrado."}, status=HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except PermissionError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.FORBIDDEN)
         except LookupError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
         except Exception as exc:
@@ -1428,6 +1473,8 @@ class LSEEController:
             self._send_json({"error": "Endpoint não encontrado."}, status=HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except PermissionError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.FORBIDDEN)
         except LookupError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
         except Exception as exc:
@@ -2438,7 +2485,8 @@ class LSEEController:
 
             if path.startswith("/api/admin/users/"):
                 user_pk = int(path.split("/")[4])
-                res = _update_admin_user_record(conn, user_pk, body)
+                current_uid = int((getattr(self, "_admin_user", None) or {}).get("uid") or 0)
+                res = _update_admin_user_record(conn, user_pk, body, current_uid=current_uid)
                 self._send_json(res)
                 return
 

@@ -4803,6 +4803,48 @@ function openNetworkModal(item) {
   });
 }
 
+function openEditSelfAdminModal(user, onSaved) {
+  openModal("Editar Meu Perfil de Administrador", `
+    <p class="muted" style="margin-top:0;font-size:0.84rem;">
+      Apenas o próprio administrador pode editar seu Número USP e nome.
+    </p>
+    <form id="form-edit-self-adm">
+      <div class="form-field">
+        <label for="edit-self-nusp">Número USP</label>
+        <input id="edit-self-nusp" class="input mono" name="numero_usp" value="${esc(user.numero_usp || "")}" placeholder="Ex.: 1234567" inputmode="numeric" required />
+      </div>
+      <div class="form-field" style="margin-top:10px;">
+        <label for="edit-self-nome">Nome / Identificação</label>
+        <input id="edit-self-nome" class="input" name="nome" value="${esc(user.nome || "")}" placeholder="Ex.: Cleiton" required />
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-secondary" type="button" onclick="closeModal()">Cancelar</button>
+        <button class="btn btn-primary" type="submit">Salvar Perfil</button>
+      </div>
+    </form>
+  `);
+  document.getElementById("form-edit-self-adm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const payload = Object.fromEntries(new FormData(e.target).entries());
+    try {
+      const res = await apiFetch(`/api/admin/users/${user.id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      if (res?.user) {
+        state.currentUser = { ...(state.currentUser || {}), ...res.user };
+      }
+      closeModal();
+      updateAuthUI();
+      pollCollab(true);
+      showToast("Perfil atualizado!");
+      if (onSaved) onSaved();
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  });
+}
+
 /* ==================== PARÂMETROS & LOG (ADMIN) ==================== */
 async function renderParamsAndAudit() {
   const el = document.getElementById("tab-parametros");
@@ -4818,7 +4860,7 @@ async function renderParamsAndAudit() {
       <div class="card-header"><h2 class="card-title">Administradores Autorizados (Login por Número USP)</h2></div>
       <div class="card-body">
         <p class="muted" style="margin-top:0;font-size:0.84rem;">
-          Todos os administradores usam a mesma senha administrativa, porém o login só é liberado para os <strong>Números USP</strong> cadastrados e ativos abaixo.
+          Todos os administradores usam a mesma senha administrativa, porém o login só é liberado para os <strong>Números USP</strong> cadastrados e ativos abaixo. Apenas o próprio administrador pode editar seu Número USP e nome.
         </p>
         <form id="form-add-admin-user" class="admin-inline-form">
           <div class="form-field" style="min-width:160px;">
@@ -4826,8 +4868,8 @@ async function renderParamsAndAudit() {
             <input id="new-adm-nusp" class="input mono" name="numero_usp" placeholder="Ex.: 1234567" inputmode="numeric" required />
           </div>
           <div class="form-field" style="flex:1;min-width:210px;">
-            <label for="new-adm-nome">Nome completo / exibição</label>
-            <input id="new-adm-nome" class="input" name="nome" placeholder="Ex.: Cleiton Sudré" required />
+            <label for="new-adm-nome">Nome / Identificação</label>
+            <input id="new-adm-nome" class="input" name="nome" placeholder="Ex.: Cleiton" required />
           </div>
           <button class="btn btn-primary" type="submit">+ Cadastrar ADM</button>
         </form>
@@ -4853,8 +4895,11 @@ async function renderParamsAndAudit() {
                     <td>${esc(u.created_by || "—")}</td>
                     <td>
                       <span class="row-actions">
-                        <button class="btn btn-sm btn-secondary js-toggle-adm" data-id="${u.id}" data-active="${u.is_active ? "1" : "0"}" type="button">${u.is_active ? "Desativar" : "Ativar"}</button>
-                        <button class="btn btn-sm btn-danger js-del-adm" data-id="${u.id}" type="button" ${isSelf ? "disabled" : ""}>Excluir</button>
+                        ${isSelf
+                          ? `<button class="btn btn-sm btn-primary js-edit-self-adm" data-id="${u.id}" type="button">Editar meu perfil</button>`
+                          : `<button class="btn btn-sm btn-secondary js-toggle-adm" data-id="${u.id}" data-active="${u.is_active ? "1" : "0"}" type="button">${u.is_active ? "Desativar" : "Ativar"}</button>
+                             <button class="btn btn-sm btn-danger js-del-adm" data-id="${u.id}" type="button">Excluir</button>`
+                        }
                       </span>
                     </td>
                   </tr>
@@ -4941,6 +4986,13 @@ async function renderParamsAndAudit() {
     } catch (err) {
       showToast(err.message, true);
     }
+  });
+
+  el.querySelectorAll(".js-edit-self-adm").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const u = admins.find((x) => Number(x.id) === Number(btn.dataset.id));
+      if (u) openEditSelfAdminModal(u, () => renderParamsAndAudit());
+    });
   });
 
   el.querySelectorAll(".js-toggle-adm").forEach((btn) => {
@@ -5141,8 +5193,8 @@ async function openLoginModal() {
       </div>
       ${state.needsBootstrap ? `
       <div class="form-field" style="margin-top:10px;">
-        <label for="login-nome">Nome completo / exibição</label>
-        <input class="input" type="text" name="nome" id="login-nome" placeholder="Ex.: Cleiton Sudré" required />
+        <label for="login-nome">Nome / Identificação</label>
+        <input class="input" type="text" name="nome" id="login-nome" placeholder="Ex.: Cleiton" required />
       </div>` : ""}
       <div class="form-field" style="margin-top:10px;">
         <label for="login-password">Senha do Administrador</label>
