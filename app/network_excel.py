@@ -360,6 +360,7 @@ def parse_network_xlsx(raw_bytes: bytes) -> Dict[str, Any]:
     }
 
     current_cat = "Computadores"
+    base_cols = dict(cols)
     records: List[Dict[str, str]] = []
     counts_by_cat: Dict[str, int] = {}
 
@@ -371,14 +372,27 @@ def parse_network_xlsx(raw_bytes: bytes) -> Dict[str, Any]:
         raw_cat = row.get(cols["cat"], "").strip() if cols["cat"] else ""
         ip = row.get(cols["ip"], "").strip()
         mac = row.get(cols["mac"], "").strip() if cols["mac"] else ""
-        dhcp = row.get(cols["dhcp"], "").strip() if cols["dhcp"] else ""
-        obs = row.get(cols["obs"], "").strip() if cols["obs"] else ""
 
         if not raw_eq:
             continue
-        if not raw_cat and not ip and not mac and not dhcp and not obs and raw_eq.lower() in known_sections:
-            current_cat = known_sections[raw_eq.lower()]
-            continue
+        if not raw_cat and not ip and not mac and raw_eq.lower() in known_sections:
+            remaining = {c: v for c, v in row.items() if c != cols["eq"] and v.strip()}
+            if not remaining or all(
+                any(k in v.lower() for k in ("dhcp", "observ"))
+                for v in remaining.values()
+            ):
+                current_cat = known_sections[raw_eq.lower()]
+                cols = dict(base_cols)
+                for c, v in remaining.items():
+                    vl = v.lower()
+                    if "dhcp" in vl and not cols["dhcp"]:
+                        cols["dhcp"] = c
+                    elif "observ" in vl and not cols["obs"]:
+                        cols["obs"] = c
+                continue
+
+        dhcp = row.get(cols["dhcp"], "").strip() if cols["dhcp"] else ""
+        obs = row.get(cols["obs"], "").strip() if cols["obs"] else ""
 
         cat = raw_cat or current_cat
         eq = _normalize_equipment_name(raw_eq)
