@@ -21,7 +21,7 @@ from .auth import (
     verify_session_token,
 )
 from .config import DEFAULT_XLSX_PATH, SESSION_COOKIE_NAME, SESSION_TTL_SECONDS, STATIC_DIR
-from .db import db_session, ensure_default_map_stations
+from .db import DEFAULT_USAGE_RULES, db_session, ensure_default_map_stations
 from .importer import import_xlsx_into_db
 from .labels import build_labels_docx, build_labels_pdf, normalize_label_pages
 from .scoring import build_score_summary, compute_state, simulate_upgrade
@@ -484,6 +484,139 @@ def _admin_pc_status_rank(pc: Dict[str, Any]) -> Tuple[int, int]:
     return (ADMIN_PC_STATUS_ORDER.get(key, 0), int(pc.get("id") or 0))
 
 
+def _update_rules(conn: Any, body: Dict[str, Any]) -> None:
+    """Atualiza pesos das notas, regras gerais, faixas de RAM e prioridades por categoria."""
+    pesos = body.get("pesos")
+    if not isinstance(pesos, dict):
+        raise ValueError("Campo 'pesos' inválido.")
+    w_keys = {
+        "cpu": ("peso_cpu", "Peso CPU", "pesos"),
+        "ram": ("peso_ram", "Peso RAM", "pesos"),
+        "armazenamento": ("peso_armazenamento", "Peso Armazenamento", "pesos"),
+        "gpu": ("peso_gpu", "Peso GPU", "pesos"),
+    }
+    parsed_weights: Dict[str, float] = {}
+    for k, (db_key, _, _) in w_keys.items():
+        try:
+            v = float(pesos[k])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Peso '{k}' inválido.") from exc
+        if v < 0.0 or v > 1.0:
+            raise ValueError(f"Peso '{k}' deve estar entre 0% e 100%.")
+        parsed_weights[db_key] = round(v, 6)
+
+    weight_sum = sum(parsed_weights.values())
+    if abs(weight_sum - 1.0) > 0.002:
+        raise ValueError(f"A soma dos 4 pesos deve ser 100% (atual: {weight_sum * 100:.1f}%).")
+
+    try:
+        diff_min = float(body.get("diferenca_minima_upgrade", 3.0))
+        peso_hd = float(body.get("armaz_peso_hd", 0.25))
+        escala_log = float(body.get("armaz_escala_log", 60.0))
+        score_max = float(body.get("score_maximo", 10.0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Parâmetros numéricos inválidos.") from exc
+
+    if diff_min < 0:
+        raise ValueError("Diferença mínima para upgrade deve ser maior ou igual a zero.")
+    if peso_hd < 0 or peso_hd > 2.0:
+        raise ValueError("Peso relativo do HD deve estar entre 0 e 2.")
+    if escala_log <= 0:
+        raise ValueError("Fator de suavização log deve ser maior que zero.")
+    if score_max <= 0 or score_max > 100:
+        raise ValueError("Score máximo componente deve ser maior que zero (até 100).")
+
+    raw_ram = body.get("ram_thresholds")
+    if not isinstance(raw_ram, list) or not raw_ram:
+        raise ValueError("Informe ao menos uma faixa de RAM mínima.")
+    ram_entries: list[tuple[float, float]] = []
+    seen_ram: set[float] = set()
+    for row in raw_ram:
+        if not isinstance(row, dict):
+            raise ValueError("Faixa de RAM inválida.")
+        try:
+            mv = float(row["min_value"])
+            sc = float(row["score"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Valores inválidos na faixa de RAM.") from exc
+        if mv < 0:
+            raise ValueError("RAM mínima não pode ser negativa.")
+        if sc < 0 or sc > score_max:
+            raise ValueError(f"Score da faixa de RAM ({mv:g} GB) deve estar entre 0 e {score_max:g}.")
+        if mv in seen_ram:
+            raise ValueError(f"Faixa de RAM duplicada: {mv:g} GB.")
+        seen_ram.add(mv)
+        ram_entries.append((mv, sc))
+    ram_entries.sort(key=lambda item: item[0])
+
+    raw_cats = body.get("categories")
+    if not isinstance(raw_cats, list) or not raw_cats:
+        raise ValueError("Lista de categorias inválida.")
+    existing_cats = {r["name"] for r in conn.execute("SELECT name FROM categories").fetchall()}
+    cat_entries: list[tuple[Optional[int], int, int, str]] = []
+    for cat in raw_cats:
+        if not isinstance(cat, dict):
+            raise ValueError("Categoria inválida.")
+        name = str(cat.get("name") or "").strip()
+        if not name:
+            raise ValueError("Nome da categoria é obrigatório.")
+        if name not in existing_cats:
+            raise ValueError(f"Categoria desconhecida: '{name}'.")
+        raw_grp = cat.get("priority_group")
+        if raw_grp in (None, ""):
+            grp: Optional[int] = None
+        else:
+            try:
+                grp = int(raw_grp)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Grupo inválido para '{name}'.") from exc
+            if grp < 1 or grp > 9:
+                raise ValueError(f"Grupo de prioridade para '{name}' deve ser entre 1 e 9 ou vazio.")
+        part_up = 1 if cat.get("participa_upgrade") else 0
+        prec_pc = 1 if cat.get("precisa_pc") else 0
+        cat_entries.append((grp, part_up, prec_pc, name))
+
+    param_rows = [
+        *[
+            (db_key, lbl, f"{parsed_weights[db_key]:g}", cat)
+            for db_key, lbl, cat in w_keys.values()
+        ],
+        ("diferenca_minima_upgrade", "Diferença mínima para upgrade", f"{diff_min:g}", "regras"),
+        ("armaz_peso_hd", "Peso relativo do HD (Armazenamento)", f"{peso_hd:g}", "armazenamento"),
+        ("armaz_escala_log", "Fator de suavização log (GB_eq)", f"{escala_log:g}", "armazenamento"),
+        ("score_maximo", "Score máximo componente", f"{score_max:g}", "armazenamento"),
+    ]
+    for key, lbl, val, cat in param_rows:
+        conn.execute(
+            """
+            INSERT INTO system_params(`key`, label, `value`, category)
+            VALUES (?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)
+            """,
+            (key, lbl, val, cat),
+        )
+
+    conn.execute("DELETE FROM score_thresholds WHERE metric = 'ram'")
+    conn.executemany(
+        "INSERT INTO score_thresholds(metric, min_value, score) VALUES ('ram', ?, ?)",
+        ram_entries,
+    )
+    conn.executemany(
+        "UPDATE categories SET priority_group = ?, participa_upgrade = ?, precisa_pc = ? WHERE name = ?",
+        cat_entries,
+    )
+    _log_audit(
+        conn,
+        "UPDATE_CRITERIA",
+        "rules",
+        (
+            f"Pesos CPU={parsed_weights['peso_cpu']*100:.1f}% RAM={parsed_weights['peso_ram']*100:.1f}% "
+            f"Arm={parsed_weights['peso_armazenamento']*100:.1f}% GPU={parsed_weights['peso_gpu']*100:.1f}%; "
+            f"{len(ram_entries)} faixas RAM; {len(cat_entries)} categorias"
+        ),
+    )
+
+
 def _free_simulator_pcs(state: Dict[str, Any]) -> list[Dict[str, Any]]:
     """Retorna apenas PCs com status 'Livre' ordenados por score decrescente."""
     pcs = [
@@ -648,6 +781,19 @@ class LSEEController:
                 return self._response  # type: ignore[return-value]
             if path == "/api/public/map":
                 self._handle_public_map()
+                return self._response  # type: ignore[return-value]
+
+            if path == "/api/public/usage-rules":
+                with db_session() as conn:
+                    row = conn.execute(
+                        "SELECT content, updated_at FROM site_contents WHERE `key` = 'usage_rules'"
+                    ).fetchone()
+                self._send_json(
+                    {
+                        "content": row["content"] if row else DEFAULT_USAGE_RULES,
+                        "updated_at": (row["updated_at"] or "") if row else "",
+                    }
+                )
                 return self._response  # type: ignore[return-value]
 
             # Rotas administrativas (exigem sessão válida)
@@ -1007,6 +1153,72 @@ class LSEEController:
                     ).fetchall()
                 ]
                 self._send_json({"items": rows})
+                return
+
+            if path == "/api/admin/release-tutorial":
+                steps = [
+                    {
+                        "title": "Passo 1: Fazer login como administrador",
+                        "details": [
+                            "Acesse a conta Administrador do Windows utilizando a senha padrão interna do laboratório (consulte a equipe responsável pela alocação).",
+                        ],
+                    },
+                    {
+                        "title": "Passo 2: Excluir o Usuário LSEE antigo",
+                        "details": [
+                            "Pressione Windows + X e selecione Gerenciamento do Computador.",
+                            "Vá em Usuários e Grupos Locais > Usuários.",
+                            "Clique com o botão direito em LSEE e selecione Excluir.",
+                        ],
+                    },
+                    {
+                        "title": "Passo 3: Excluir os dados antigos e limpar o D:",
+                        "details": [
+                            "Navegue até C:\\Users e exclua a pasta LSEE com Shift + Del.",
+                            "Formate o disco D: caso ele exista.",
+                            "Reinicie o computador.",
+                        ],
+                    },
+                    {
+                        "title": "Passo 4: Criar o novo Usuário LSEE (Administrador)",
+                        "details": [
+                            "Abra novamente Gerenciamento do Computador > Usuários e Grupos Locais > Usuários.",
+                            "Clique com o botão direito e escolha Novo Usuário (usuário LSEE; configure senha nunca expira / sem troca obrigatória).",
+                            "Clique em Criar e feche a janela.",
+                            "Vá em Grupos > Administradores > Adicionar, digite LSEE, clique em Verificar Nomes, OK, Aplicar e OK.",
+                            "Reinicie o computador.",
+                        ],
+                    },
+                    {
+                        "title": "Passo 5: Fazer login no novo usuário LSEE",
+                        "details": [
+                            "Entre na conta LSEE recém-criada e desinstale softwares não padrões instalados pelo usuário anterior.",
+                        ],
+                    },
+                    {
+                        "title": "Passo 6: Executar Limpeza de Disco",
+                        "details": [
+                            "Abra Limpeza de Disco no Menu Iniciar > OK.",
+                            "Clique em Limpar arquivos do sistema > OK, marque todas as opções e confirme em OK.",
+                        ],
+                    },
+                    {
+                        "title": "Passo 7: Criar 2 pontos de restauração",
+                        "details": [
+                            "No Menu Iniciar, abra Criar ponto de restauração.",
+                            "Selecione o Disco C > Configurar > marque Ativar > Aplicar > OK.",
+                            "Clique em Criar e gere 2 pontos com os nomes: \"PC limpo\" e \"PC limpo 2\".",
+                        ],
+                    },
+                    {
+                        "title": "Passo 8: Desativar modo de recuperação após falta de energia",
+                        "details": [
+                            "Abra o Prompt de Comandos (CMD) como Administrador e execute o comando abaixo:",
+                        ],
+                        "command": "bcdedit /set {current} recoveryenabled no",
+                    },
+                ]
+                self._send_json({"steps": steps})
                 return
 
             self._send_json({"error": "Rota administrativa não encontrada."}, status=HTTPStatus.NOT_FOUND)
@@ -1466,6 +1678,11 @@ class LSEEController:
                 self._send_json({"ok": True, **info, "map": _build_map_payload(conn, state, admin_mode=True)})
                 return
 
+            if path == "/api/admin/rules":
+                _update_rules(conn, body)
+                self._send_json({"ok": True})
+                return
+
             if path == "/api/admin/params":
                 updates = body.get("params") or {}
                 if not isinstance(updates, dict):
@@ -1474,6 +1691,22 @@ class LSEEController:
                     conn.execute("UPDATE system_params SET `value` = ? WHERE `key` = ?", (str(v).strip(), str(k)))
                 _log_audit(conn, "UPDATE_PARAMS", "system_params", f"Chaves atualizadas: {list(updates.keys())}")
                 self._send_json({"ok": True})
+                return
+
+            if path == "/api/admin/usage-rules":
+                content = str(body.get("content") or "").strip()
+                if not content:
+                    raise ValueError("O texto das regras de uso não pode ficar vazio.")
+                now = _now_iso()
+                conn.execute(
+                    """
+                    INSERT INTO site_contents(`key`, content, updated_at) VALUES ('usage_rules', ?, ?)
+                    ON DUPLICATE KEY UPDATE content = VALUES(content), updated_at = VALUES(updated_at)
+                    """,
+                    (content, now),
+                )
+                _log_audit(conn, "UPDATE_USAGE_RULES", "usage_rules", "Regras de uso atualizadas")
+                self._send_json({"ok": True, "content": content, "updated_at": now})
                 return
 
             self._send_json({"error": "Rota PUT administrativa não encontrada."}, status=HTTPStatus.NOT_FOUND)

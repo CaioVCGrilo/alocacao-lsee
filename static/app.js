@@ -52,6 +52,7 @@ const state = {
     draft: null,
     quantity: 1,
     skipFilled: true,
+    autoIncrement: false,
     activePage: 0,
     selectedSlot: 0,
     pages: [Array(18).fill(null)],
@@ -377,6 +378,105 @@ async function openScoreInfoModal() {
         <button class="btn btn-primary" type="button" onclick="closeModal()">Fechar</button>
       </div>
     `;
+  } catch (err) {
+    document.getElementById("modal-body").innerHTML = `<p class="muted">${esc(err.message)}</p>`;
+  }
+}
+
+async function openUsageRulesModal() {
+  openModal("Regras Internas de Uso dos Computadores", '<p class="muted">Carregando regras...</p>', true);
+  try {
+    const data = await apiFetch("/api/public/usage-rules");
+    let currentContent = data.content || "";
+
+    const renderView = () => {
+      document.getElementById("modal-body").innerHTML = `
+        <div class="rules-text-view">${esc(currentContent)}</div>
+        <div class="form-actions">
+          ${state.isAdmin ? '<button id="btn-edit-usage-rules" class="btn btn-secondary" type="button">Editar texto</button>' : ""}
+          <button class="btn btn-primary" type="button" onclick="closeModal()">Fechar</button>
+        </div>
+      `;
+      document.getElementById("btn-edit-usage-rules")?.addEventListener("click", renderEditor);
+    };
+
+    const renderEditor = () => {
+      document.getElementById("modal-body").innerHTML = `
+        <form id="form-usage-rules">
+          <div class="form-field">
+            <label for="usage-rules-textarea">Texto exibido para todos os usuários (Visão Pública e Admin)</label>
+            <textarea id="usage-rules-textarea" class="input" name="content" rows="12" style="width:100%;resize:vertical;" required>${esc(currentContent)}</textarea>
+          </div>
+          <div class="form-actions">
+            <button id="btn-cancel-usage-rules" class="btn btn-secondary" type="button">Cancelar</button>
+            <button class="btn btn-primary" type="submit">Salvar alterações</button>
+          </div>
+        </form>
+      `;
+      document.getElementById("btn-cancel-usage-rules").addEventListener("click", renderView);
+      document.getElementById("form-usage-rules").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const content = new FormData(e.target).get("content") || "";
+        try {
+          const saved = await apiFetch("/api/admin/usage-rules", {
+            method: "PUT",
+            body: JSON.stringify({ content }),
+          });
+          currentContent = saved.content || String(content).trim();
+          showToast("Regras de uso atualizadas!");
+          renderView();
+        } catch (err) {
+          showToast(err.message, true);
+        }
+      });
+    };
+
+    renderView();
+  } catch (err) {
+    document.getElementById("modal-body").innerHTML = `<p class="muted">${esc(err.message)}</p>`;
+  }
+}
+
+async function openReleaseTutorialModal() {
+  openModal("Tutorial de Liberação de PC (Modo Admin)", '<p class="muted">Carregando tutorial...</p>', true);
+  try {
+    const data = await apiFetch("/api/admin/release-tutorial");
+    const steps = data.steps || [];
+    document.getElementById("modal-body").innerHTML = `
+      <p class="help-intro">
+        Checklist padrão para limpar e preparar um computador do LSEE antes de entregá-lo ao próximo usuário:
+      </p>
+      <div class="tutorial-steps-grid">
+        ${steps.map((st) => `
+          <div class="tutorial-step-card">
+            <h3>${esc(st.title)}</h3>
+            <ul>
+              ${(st.details || []).map((d) => `<li>${esc(d)}</li>`).join("")}
+            </ul>
+            ${st.command ? `
+              <div class="tutorial-cmd-row">
+                <code>${esc(st.command)}</code>
+                <button class="btn btn-sm btn-secondary js-copy-cmd" data-cmd="${esc(st.command)}" type="button">Copiar</button>
+              </div>
+            ` : ""}
+          </div>
+        `).join("")}
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="button" onclick="closeModal()">Fechar</button>
+      </div>
+    `;
+    document.querySelectorAll(".js-copy-cmd").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const cmd = btn.dataset.cmd || "";
+        try {
+          await navigator.clipboard.writeText(cmd);
+          showToast("Comando copiado!");
+        } catch {
+          showToast(`Copie manualmente: ${cmd}`);
+        }
+      });
+    });
   } catch (err) {
     document.getElementById("modal-body").innerHTML = `<p class="muted">${esc(err.message)}</p>`;
   }
@@ -1572,7 +1672,7 @@ async function renderComputers() {
     <div class="card">
       <div class="card-header">
         <h2 class="card-title">Inventário de Computadores (${filtered.length})</h2>
-        ${state.isAdmin ? '<span class="row-actions"><button id="btn-go-labels-pc" class="btn btn-secondary btn-sm" type="button">Etiquetas</button><button id="btn-new-pc" class="btn btn-primary btn-sm" type="button">+ Novo PC</button></span>' : ""}
+        ${state.isAdmin ? '<span class="row-actions"><button id="btn-comp-tutorial" class="btn btn-secondary btn-sm" type="button">Tutorial: Liberar PC</button><button id="btn-go-labels-pc" class="btn btn-secondary btn-sm" type="button">Etiquetas</button><button id="btn-new-pc" class="btn btn-primary btn-sm" type="button">+ Novo PC</button></span>' : ""}
       </div>
       <div class="card-body">
         <div class="toolbar">
@@ -1671,6 +1771,7 @@ async function renderComputers() {
       state.compFilters.pendencia = e.target.value;
       renderComputers();
     });
+    document.getElementById("btn-comp-tutorial").addEventListener("click", openReleaseTutorialModal);
     document.getElementById("btn-go-labels-pc").addEventListener("click", () => {
       state.labels.mode = "pc";
       switchTab("etiquetas");
@@ -2025,7 +2126,10 @@ async function renderCriterios() {
     </div>
     <div class="grid-2">
       <div class="card">
-        <div class="card-header"><h2 class="card-title">Pesos do Score e Regras Gerais</h2></div>
+        <div class="card-header">
+          <h2 class="card-title">Pesos do Score e Regras Gerais</h2>
+          <button id="btn-edit-criterios" class="btn btn-primary btn-sm" type="button">Editar Critérios</button>
+        </div>
         <div class="card-body">
           <table>
             <tbody>
@@ -2040,7 +2144,10 @@ async function renderCriterios() {
       </div>
 
       <div class="card">
-        <div class="card-header"><h2 class="card-title">Prioridade por Categoria</h2></div>
+        <div class="card-header">
+          <h2 class="card-title">Prioridade por Categoria</h2>
+          <button class="btn btn-secondary btn-sm js-edit-criterios" type="button">Editar</button>
+        </div>
         <div class="card-body">
           <table>
             <thead>
@@ -2067,7 +2174,10 @@ async function renderCriterios() {
     </div>
 
     <div class="card">
-      <div class="card-header"><h2 class="card-title">Faixa de RAM e Escala de Armazenamento</h2></div>
+      <div class="card-header">
+        <h2 class="card-title">Faixa de RAM e Escala de Armazenamento</h2>
+        <button class="btn btn-secondary btn-sm js-edit-criterios" type="button">Editar</button>
+      </div>
       <div class="card-body">
         <div class="grid-2" style="margin-bottom:0;">
           <div>
@@ -2131,6 +2241,10 @@ async function renderCriterios() {
     </div>
   `;
 
+  document.getElementById("btn-edit-criterios").addEventListener("click", () => openCriteriosModal(data));
+  el.querySelectorAll(".js-edit-criterios").forEach((btn) => {
+    btn.addEventListener("click", () => openCriteriosModal(data));
+  });
   document.getElementById("btn-new-proc").addEventListener("click", () => openProcessorModal(null));
   el.querySelectorAll(".js-edit-proc").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -2140,10 +2254,181 @@ async function renderCriterios() {
   });
 }
 
+function openCriteriosModal(data) {
+  const pct = (v) => Number((Number(v || 0) * 100).toFixed(2));
+  const ramRows = [...(data.thresholds?.ram || [])].sort((a, b) => Number(a.min_value) - Number(b.min_value));
+  const cats = (data.categories || []).map((c) => ({ ...c }));
+
+  const ramRowHtml = (mv = "", sc = "") => `
+    <tr class="js-crit-ram-row">
+      <td><input class="input js-crit-ram-gb" type="number" min="0" step="any" value="${esc(mv)}" required style="width:100%;" /></td>
+      <td><input class="input js-crit-ram-score" type="number" min="0" max="100" step="any" value="${esc(sc)}" required style="width:100%;" /></td>
+      <td style="width:44px;text-align:center;"><button class="btn btn-sm btn-danger js-crit-ram-del" type="button" title="Remover faixa">&times;</button></td>
+    </tr>
+  `;
+
+  openModal("Editar Critérios e Pesos", `
+    <form id="form-criterios">
+      <div class="card" style="margin-bottom:12px;">
+        <div class="card-header">
+          <h3 class="card-title" style="font-size:0.9rem;">Pesos das Notas (%) e Regras Gerais</h3>
+          <span id="crit-weight-sum" class="badge badge-ok">Soma: 100.0%</span>
+        </div>
+        <div class="card-body">
+          <div class="form-grid">
+            <div class="form-field"><label>Peso CPU (%)</label><input class="input js-crit-weight" name="w_cpu" type="number" min="0" max="100" step="0.1" value="${pct(data.pesos.cpu)}" required /></div>
+            <div class="form-field"><label>Peso RAM (%)</label><input class="input js-crit-weight" name="w_ram" type="number" min="0" max="100" step="0.1" value="${pct(data.pesos.ram)}" required /></div>
+            <div class="form-field"><label>Peso Armazenamento (%)</label><input class="input js-crit-weight" name="w_arm" type="number" min="0" max="100" step="0.1" value="${pct(data.pesos.armazenamento)}" required /></div>
+            <div class="form-field"><label>Peso GPU (%)</label><input class="input js-crit-weight" name="w_gpu" type="number" min="0" max="100" step="0.1" value="${pct(data.pesos.gpu)}" required /></div>
+            <div class="form-field"><label>Diferença mínima p/ upgrade</label><input class="input" name="diff_min" type="number" min="0" step="any" value="${esc(data.diferenca_minima_upgrade)}" required /></div>
+            <div class="form-field"><label>Score máximo componente</label><input class="input" name="score_max" type="number" min="1" max="100" step="any" value="${esc(data.score_maximo)}" required /></div>
+            <div class="form-field"><label>Peso relativo HD (% do SSD)</label><input class="input" name="peso_hd_pct" type="number" min="0" max="200" step="any" value="${pct(data.armaz_peso_hd)}" required /></div>
+            <div class="form-field"><label>Fator suavização log (GB eq.)</label><input class="input" name="escala_log" type="number" min="1" step="any" value="${esc(data.armaz_escala_log)}" required /></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-bottom:12px;">
+        <div class="card" style="margin-bottom:0;">
+          <div class="card-header">
+            <h3 class="card-title" style="font-size:0.9rem;">Score por Faixa de RAM</h3>
+            <button id="btn-crit-add-ram" class="btn btn-sm btn-secondary" type="button">+ Faixa</button>
+          </div>
+          <div class="card-body">
+            <table>
+              <thead><tr><th>RAM mínima (GB)</th><th>Score</th><th></th></tr></thead>
+              <tbody id="crit-ram-tbody">
+                ${ramRows.map((t) => ramRowHtml(t.min_value, t.score)).join("")}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:0;">
+          <div class="card-header"><h3 class="card-title" style="font-size:0.9rem;">Prioridade por Categoria</h3></div>
+          <div class="card-body">
+            <table>
+              <thead><tr><th>Categoria</th><th>Grupo</th><th>Upgrade</th><th>Sem PC</th></tr></thead>
+              <tbody>
+                ${cats.map((c, idx) => `
+                  <tr class="js-crit-cat-row" data-name="${esc(c.name)}">
+                    <td><strong>${esc(c.name)}</strong></td>
+                    <td>
+                      <select class="select js-crit-cat-group" aria-label="Grupo de ${esc(c.name)}">
+                        <option value="" ${!c.priority_group ? "selected" : ""}>Sem grupo</option>
+                        ${[1, 2, 3, 4].map((g) => `<option value="${g}" ${Number(c.priority_group) === g ? "selected" : ""}>Grupo ${g}</option>`).join("")}
+                      </select>
+                    </td>
+                    <td style="text-align:center;"><input class="js-crit-cat-up" type="checkbox" ${c.participa_upgrade ? "checked" : ""} aria-label="Participa Upgrade ${idx}" /></td>
+                    <td style="text-align:center;"><input class="js-crit-cat-sempc" type="checkbox" ${c.precisa_pc ? "checked" : ""} aria-label="Conta como Sem PC ${idx}" /></td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-actions" style="margin-top:0;">
+        <button class="btn btn-secondary" type="button" onclick="closeModal()">Cancelar</button>
+        <button class="btn btn-primary" type="submit">Salvar Critérios</button>
+      </div>
+    </form>
+  `, true);
+
+  const updateWeightBadge = () => {
+    const sum = [...document.querySelectorAll(".js-crit-weight")]
+      .reduce((acc, inp) => acc + (Number(inp.value) || 0), 0);
+    const badge = document.getElementById("crit-weight-sum");
+    const valid = Math.abs(sum - 100) <= 0.2;
+    badge.textContent = `Soma: ${sum.toFixed(1)}%`;
+    badge.className = `badge ${valid ? "badge-ok" : "badge-danger"}`;
+  };
+  document.querySelectorAll(".js-crit-weight").forEach((inp) => {
+    inp.addEventListener("input", updateWeightBadge);
+  });
+  updateWeightBadge();
+
+  const ramTbody = document.getElementById("crit-ram-tbody");
+  ramTbody.addEventListener("click", (e) => {
+    const delBtn = e.target.closest(".js-crit-ram-del");
+    if (!delBtn) return;
+    if (ramTbody.querySelectorAll(".js-crit-ram-row").length <= 1) {
+      showToast("Mantenha pelo menos uma faixa de RAM.", true);
+      return;
+    }
+    delBtn.closest(".js-crit-ram-row")?.remove();
+  });
+  document.getElementById("btn-crit-add-ram").addEventListener("click", () => {
+    ramTbody.insertAdjacentHTML("beforeend", ramRowHtml("", ""));
+  });
+
+  document.getElementById("form-criterios").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const wCpu = Number(fd.get("w_cpu"));
+    const wRam = Number(fd.get("w_ram"));
+    const wArm = Number(fd.get("w_arm"));
+    const wGpu = Number(fd.get("w_gpu"));
+    const sum = wCpu + wRam + wArm + wGpu;
+    if (Math.abs(sum - 100) > 0.2) {
+      showToast(`A soma dos 4 pesos deve ser 100% (atual: ${sum.toFixed(1)}%).`, true);
+      return;
+    }
+
+    const ram_thresholds = [...ramTbody.querySelectorAll(".js-crit-ram-row")].map((tr) => ({
+      min_value: Number(tr.querySelector(".js-crit-ram-gb").value),
+      score: Number(tr.querySelector(".js-crit-ram-score").value),
+    }));
+    const categories = [...document.querySelectorAll(".js-crit-cat-row")].map((tr) => {
+      const grpVal = tr.querySelector(".js-crit-cat-group").value;
+      return {
+        name: tr.dataset.name,
+        priority_group: grpVal === "" ? null : Number(grpVal),
+        participa_upgrade: tr.querySelector(".js-crit-cat-up").checked ? 1 : 0,
+        precisa_pc: tr.querySelector(".js-crit-cat-sempc").checked ? 1 : 0,
+      };
+    });
+
+    try {
+      await apiFetch("/api/admin/rules", {
+        method: "PUT",
+        body: JSON.stringify({
+          pesos: {
+            cpu: wCpu / 100,
+            ram: wRam / 100,
+            armazenamento: wArm / 100,
+            gpu: wGpu / 100,
+          },
+          diferenca_minima_upgrade: Number(fd.get("diff_min")),
+          score_maximo: Number(fd.get("score_max")),
+          armaz_peso_hd: Number(fd.get("peso_hd_pct")) / 100,
+          armaz_escala_log: Number(fd.get("escala_log")),
+          ram_thresholds,
+          categories,
+        }),
+      });
+      closeModal();
+      showToast("Critérios atualizados! Scores recalculados.");
+      renderCriterios();
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  });
+}
+
 function openProcessorModal(proc) {
   const isNew = !proc;
   const p = proc || {};
   openModal(isNew ? "Novo Processador" : `Editar ${p.name}`, `
+    <div class="notice" style="margin-bottom:12px;">
+      <strong>Protocolo de Avaliação (CPU-Z):</strong>
+      <ol style="margin:6px 0 0 18px;padding:0;">
+        <li>Ligue o computador e aguarde o Windows inicializar por completo.</li>
+        <li>Execute o benchmark do <strong>CPU-Z 2 vezes consecutivas</strong> e anote <strong>Multi</strong> e <strong>Single</strong> apenas da <strong>2ª execução</strong>.</li>
+        <li>Anote também o número total de <strong>Threads</strong> do processador.</li>
+      </ol>
+    </div>
     <form id="form-proc">
       <div class="form-grid">
         <div class="form-field"><label>Nome</label><input class="input" name="name" value="${esc(p.name || "")}" ${isNew ? "required" : "readonly"} /></div>
@@ -2355,7 +2640,10 @@ async function renderAllocations() {
     <div class="card">
       <div class="card-header">
         <h2 class="card-title">Alocações (${items.length})</h2>
-        <button id="btn-new-aloc" class="btn btn-primary btn-sm" type="button">+ Nova Alocação</button>
+        <span class="row-actions">
+          <button id="btn-aloc-tutorial" class="btn btn-secondary btn-sm" type="button">Tutorial: Liberar PC</button>
+          <button id="btn-new-aloc" class="btn btn-primary btn-sm" type="button">+ Nova Alocação</button>
+        </span>
       </div>
       <div class="card-body">
         <div class="toolbar">
@@ -2405,6 +2693,7 @@ async function renderAllocations() {
     state.alocOnlyActive = e.target.checked;
     renderAllocations();
   });
+  document.getElementById("btn-aloc-tutorial").addEventListener("click", openReleaseTutorialModal);
   document.getElementById("btn-new-aloc").addEventListener("click", () => openNewAllocationModal(data.people, data.pcs));
   el.querySelectorAll(".js-close-aloc").forEach((btn) => {
     btn.addEventListener("click", () => openCloseAllocationModal(btn.dataset.id, btn.dataset.label));
@@ -2681,6 +2970,42 @@ function formatMonitorLabelDraft(mon) {
   };
 }
 
+function formatPlacaLabelDraft(num = 1) {
+  const codeNum = String(num).padStart(2, "0");
+  return {
+    kind: "placa",
+    code: `Placa ${codeNum}`,
+    lines: [
+      { label: "Canais:", value: "6 entradas" },
+      { label: "Entradas:", value: "CA ± 10 V pico · CC 0-10 V" },
+      { label: "Saídas:", value: "1,5±1,5 V ou 0-3 V" },
+      { label: "Filtro:", value: "1ª ordem 480 Hz" },
+    ],
+  };
+}
+
+function formatBlankFreeLabelDraft() {
+  return {
+    kind: "placa",
+    code: "Item 01",
+    lines: [
+      { label: "Linha 1:", value: "" },
+      { label: "Linha 2:", value: "" },
+      { label: "Linha 3:", value: "" },
+      { label: "Projeto:", value: "-" },
+    ],
+  };
+}
+
+function incrementLabelCode(code, offset) {
+  if (!offset) return code;
+  const m = /^(.*?)(\d+)(\s*)$/.exec(String(code || ""));
+  if (!m) return code;
+  const nextNum = Number(m[2]) + offset;
+  const padded = String(nextNum).padStart(m[2].length, "0");
+  return `${m[1]}${padded}${m[3]}`;
+}
+
 function cloneLabelData(lbl) {
   if (!lbl) return null;
   return {
@@ -2805,6 +3130,8 @@ async function renderLabels() {
     if (ls.mode === "monitor" && monsSorted.length) {
       ls.selectedMonitorId = String(monsSorted[0].id);
       ls.draft = formatMonitorLabelDraft(monsSorted[0]);
+    } else if (ls.mode === "placa") {
+      ls.draft = formatPlacaLabelDraft(1);
     } else if (pcsSorted.length) {
       ls.mode = "pc";
       ls.selectedPcId = String(pcsSorted[0].id);
@@ -2823,6 +3150,7 @@ async function renderLabels() {
 
   const itemList = ls.mode === "pc" ? pcsSorted : monsSorted;
   const selectedItemId = ls.mode === "pc" ? ls.selectedPcId : ls.selectedMonitorId;
+  const isFreeMode = ls.mode === "placa" || ls.draft.kind === "placa";
 
   el.innerHTML = `
     <div class="labels-layout">
@@ -2833,29 +3161,42 @@ async function renderLabels() {
           </div>
           <div class="card-body">
             <div class="labels-mode-switch">
-              <button class="labels-mode-btn ${ls.mode === "pc" ? "active" : ""}" id="btn-lbl-mode-pc" type="button">Computadores (PC)</button>
+              <button class="labels-mode-btn ${ls.mode === "pc" ? "active" : ""}" id="btn-lbl-mode-pc" type="button">PCs</button>
               <button class="labels-mode-btn ${ls.mode === "monitor" ? "active" : ""}" id="btn-lbl-mode-mon" type="button">Monitores</button>
+              <button class="labels-mode-btn ${ls.mode === "placa" ? "active" : ""}" id="btn-lbl-mode-placa" type="button">Placas / Livre</button>
             </div>
 
-            <div class="form-field" style="margin-bottom:10px;">
-              <label for="lbl-item-select">${ls.mode === "pc" ? "Selecionar PC do inventário" : "Selecionar Monitor do inventário"}</label>
-              <select id="lbl-item-select" class="select">
-                <option value="">-- Preencher manualmente / em branco --</option>
-                ${itemList.map((item) => {
-                  const labelText = ls.mode === "pc"
-                    ? `${item.id_pc} · ${item.processador || "sem CPU"} · ${item.ram_gb ? `${item.ram_gb} GB` : "?"}`
-                    : `${item.id_monitor} · ${item.marca_modelo || "sem modelo"} · ${item.tamanho || "?"}`;
-                  return `<option value="${item.id}" ${String(item.id) === String(selectedItemId) ? "selected" : ""}>${esc(labelText)}</option>`;
-                }).join("")}
-              </select>
-            </div>
+            ${ls.mode === "placa" ? `
+              <div class="labels-btn-row" style="margin-top:0;margin-bottom:10px;">
+                <button id="btn-lbl-preset-placa" class="btn btn-secondary btn-sm" type="button">Modelo: Placa (6 entradas)</button>
+                <button id="btn-lbl-preset-blank" class="btn btn-secondary btn-sm" type="button">Rótulos livres</button>
+              </div>
+            ` : `
+              <div class="form-field" style="margin-bottom:10px;">
+                <label for="lbl-item-select">${ls.mode === "pc" ? "Selecionar PC do inventário" : "Selecionar Monitor do inventário"}</label>
+                <select id="lbl-item-select" class="select">
+                  <option value="">-- Preencher manualmente / em branco --</option>
+                  ${itemList.map((item) => {
+                    const labelText = ls.mode === "pc"
+                      ? `${item.id_pc} · ${item.processador || "sem CPU"} · ${item.ram_gb ? `${item.ram_gb} GB` : "?"}`
+                      : `${item.id_monitor} · ${item.marca_modelo || "sem modelo"} · ${item.tamanho || "?"}`;
+                    return `<option value="${item.id}" ${String(item.id) === String(selectedItemId) ? "selected" : ""}>${esc(labelText)}</option>`;
+                  }).join("")}
+                </select>
+              </div>
+            `}
 
             <div class="form-field" style="margin-bottom:10px;">
               <label for="lbl-code">Código em destaque</label>
-              <input id="lbl-code" class="input mono" value="${esc(ls.draft.code || "")}" placeholder="${ls.mode === "pc" ? "Ex: PC 063" : "Ex: MN 071"}" />
+              <input id="lbl-code" class="input mono" value="${esc(ls.draft.code || "")}" placeholder="${ls.mode === "pc" ? "Ex: PC 063" : ls.mode === "monitor" ? "Ex: MN 071" : "Ex: Placa 01"}" />
             </div>
 
-            ${(ls.draft.lines || []).map((ln, idx) => `
+            ${(ls.draft.lines || []).map((ln, idx) => isFreeMode ? `
+              <div class="labels-free-line-row">
+                <input class="input js-lbl-line-label" data-idx="${idx}" value="${esc(ln.label || "")}" placeholder="Rótulo:" aria-label="Rótulo linha ${idx + 1}" />
+                <input id="lbl-line-${idx}" class="input js-lbl-line-val" data-idx="${idx}" value="${esc(ln.value || "")}" placeholder="Valor" aria-label="Valor linha ${idx + 1}" />
+              </div>
+            ` : `
               <div class="form-field" style="margin-bottom:8px;">
                 <label for="lbl-line-${idx}">${esc(ln.label)}</label>
                 <input id="lbl-line-${idx}" class="input js-lbl-line-val" data-idx="${idx}" value="${esc(ln.value || "")}" />
@@ -2881,9 +3222,14 @@ async function renderLabels() {
                 <label for="lbl-qty">Quantidade</label>
                 <input id="lbl-qty" class="input" type="number" min="1" max="54" value="${ls.quantity}" />
               </div>
-              <label style="font-size:0.82rem;font-weight:600;display:flex;align-items:center;gap:6px;padding-bottom:8px;">
-                <input id="lbl-skip-filled" type="checkbox" ${ls.skipFilled ? "checked" : ""} /> Pular espaços já ocupados
-              </label>
+              <div style="display:flex;flex-direction:column;gap:4px;padding-bottom:4px;">
+                <label style="font-size:0.81rem;font-weight:600;display:flex;align-items:center;gap:6px;">
+                  <input id="lbl-skip-filled" type="checkbox" ${ls.skipFilled ? "checked" : ""} /> Pular espaços ocupados
+                </label>
+                <label style="font-size:0.81rem;font-weight:600;display:flex;align-items:center;gap:6px;">
+                  <input id="lbl-auto-inc" type="checkbox" ${ls.autoIncrement ? "checked" : ""} /> Numerar sequência (+1)
+                </label>
+              </div>
             </div>
 
             <div class="labels-btn-row">
@@ -2895,25 +3241,27 @@ async function renderLabels() {
               <button id="btn-lbl-clear-page" class="btn btn-danger btn-sm" type="button">Limpar folha</button>
             </div>
 
-            <details style="margin-top:12px;">
-              <summary style="cursor:pointer;font-size:0.84rem;font-weight:600;color:var(--brand);">Adicionar vários ${ls.mode === "pc" ? "PCs" : "Monitores"} em sequência</summary>
-              <div class="labels-batch-list">
-                ${itemList.map((item) => {
-                  const main = ls.mode === "pc" ? item.id_pc : item.id_monitor;
-                  const sub = ls.mode === "pc" ? (item.processador || "sem CPU") : (item.marca_modelo || "sem modelo");
-                  return `
-                    <label class="labels-batch-item">
-                      <input type="checkbox" class="js-lbl-batch-cb" value="${item.id}" />
-                      <span class="mono"><strong>${esc(main)}</strong></span>
-                      <span class="muted">${esc(sub)}</span>
-                    </label>
-                  `;
-                }).join("") || '<span class="muted" style="font-size:0.8rem;">Nenhum item disponível.</span>'}
-              </div>
-              <div class="labels-btn-row">
-                <button id="btn-lbl-add-batch" class="btn btn-secondary btn-sm" type="button">Adicionar selecionados nos próximos livres</button>
-              </div>
-            </details>
+            ${ls.mode !== "placa" ? `
+              <details style="margin-top:12px;">
+                <summary style="cursor:pointer;font-size:0.84rem;font-weight:600;color:var(--brand);">Adicionar vários ${ls.mode === "pc" ? "PCs" : "Monitores"} em sequência</summary>
+                <div class="labels-batch-list">
+                  ${itemList.map((item) => {
+                    const main = ls.mode === "pc" ? item.id_pc : item.id_monitor;
+                    const sub = ls.mode === "pc" ? (item.processador || "sem CPU") : (item.marca_modelo || "sem modelo");
+                    return `
+                      <label class="labels-batch-item">
+                        <input type="checkbox" class="js-lbl-batch-cb" value="${item.id}" />
+                        <span class="mono"><strong>${esc(main)}</strong></span>
+                        <span class="muted">${esc(sub)}</span>
+                      </label>
+                    `;
+                  }).join("") || '<span class="muted" style="font-size:0.8rem;">Nenhum item disponível.</span>'}
+                </div>
+                <div class="labels-btn-row">
+                  <button id="btn-lbl-add-batch" class="btn btn-secondary btn-sm" type="button">Adicionar selecionados nos próximos livres</button>
+                </div>
+              </details>
+            ` : ""}
           </div>
         </div>
       </div>
@@ -2995,7 +3343,25 @@ async function renderLabels() {
     renderLabels();
   });
 
-  document.getElementById("lbl-item-select").addEventListener("change", (e) => {
+  document.getElementById("btn-lbl-mode-placa").addEventListener("click", () => {
+    ls.mode = "placa";
+    if (!ls.draft || ls.draft.kind !== "placa") {
+      ls.draft = formatPlacaLabelDraft(1);
+    }
+    renderLabels();
+  });
+
+  document.getElementById("btn-lbl-preset-placa")?.addEventListener("click", () => {
+    ls.draft = formatPlacaLabelDraft(1);
+    renderLabels();
+  });
+
+  document.getElementById("btn-lbl-preset-blank")?.addEventListener("click", () => {
+    ls.draft = formatBlankFreeLabelDraft();
+    renderLabels();
+  });
+
+  document.getElementById("lbl-item-select")?.addEventListener("change", (e) => {
     const pickedId = e.target.value;
     if (ls.mode === "pc") {
       ls.selectedPcId = pickedId;
@@ -3017,11 +3383,19 @@ async function renderLabels() {
   document.getElementById("lbl-code").addEventListener("input", (e) => {
     ls.draft.code = e.target.value;
   });
-  el.querySelectorAll(".js-lbl-line-val").forEach((inp) => {
-    inp.addEventListener("input", (e) => {
+  el.querySelectorAll(".js-lbl-line-label").forEach((inp) => {
+    inp.addEventListener("input", () => {
       const idx = Number(inp.dataset.idx);
       if (ls.draft.lines[idx]) {
-        ls.draft.lines[idx].value = e.target.value;
+        ls.draft.lines[idx].label = inp.value;
+      }
+    });
+  });
+  el.querySelectorAll(".js-lbl-line-val").forEach((inp) => {
+    inp.addEventListener("input", () => {
+      const idx = Number(inp.dataset.idx);
+      if (ls.draft.lines[idx]) {
+        ls.draft.lines[idx].value = inp.value;
       }
     });
   });
@@ -3040,9 +3414,15 @@ async function renderLabels() {
   document.getElementById("lbl-skip-filled").addEventListener("change", (e) => {
     ls.skipFilled = Boolean(e.target.checked);
   });
+  document.getElementById("lbl-auto-inc").addEventListener("change", (e) => {
+    ls.autoIncrement = Boolean(e.target.checked);
+  });
 
   document.getElementById("btn-lbl-place-one").addEventListener("click", () => {
     ls.pages[ls.activePage][ls.selectedSlot] = cloneLabelData(ls.draft);
+    if (ls.autoIncrement) {
+      ls.draft.code = incrementLabelCode(ls.draft.code, 1);
+    }
     const next = findNextEmptySlot(ls.activePage, ls.selectedSlot + 1) || findNextEmptySlot(0, 0);
     if (next) {
       ls.activePage = next.pageIdx;
@@ -3054,13 +3434,21 @@ async function renderLabels() {
   document.getElementById("btn-lbl-fill-qty").addEventListener("click", () => {
     const qty = Math.max(1, Math.min(54, Number(document.getElementById("lbl-qty").value) || 1));
     ls.quantity = qty;
-    const copies = Array.from({ length: qty }, () => ls.draft);
+    const copies = Array.from({ length: qty }, (_, idx) => {
+      const c = cloneLabelData(ls.draft);
+      if (ls.autoIncrement) c.code = incrementLabelCode(c.code, idx);
+      return c;
+    });
     placeMultipleLabels(copies, ls.activePage, ls.selectedSlot, ls.skipFilled);
     renderLabels();
   });
 
   document.getElementById("btn-lbl-fill-page").addEventListener("click", () => {
-    ls.pages[ls.activePage] = Array.from({ length: 18 }, () => cloneLabelData(ls.draft));
+    ls.pages[ls.activePage] = Array.from({ length: 18 }, (_, idx) => {
+      const c = cloneLabelData(ls.draft);
+      if (ls.autoIncrement) c.code = incrementLabelCode(c.code, idx);
+      return c;
+    });
     renderLabels();
   });
 
@@ -3070,7 +3458,7 @@ async function renderLabels() {
     renderLabels();
   });
 
-  document.getElementById("btn-lbl-add-batch").addEventListener("click", () => {
+  document.getElementById("btn-lbl-add-batch")?.addEventListener("click", () => {
     const ids = [...el.querySelectorAll(".js-lbl-batch-cb:checked")].map((cb) => cb.value);
     if (!ids.length) {
       showToast("Selecione pelo menos um equipamento da lista.", true);
@@ -3403,8 +3791,8 @@ function openAdminHelpModal() {
       tab: "criterios",
       title: "5. Critérios & CPUs",
       items: [
-        "Mostra pesos do Score, escalas de RAM/Armazenamento e prioridades por categoria.",
-        "Em \"+ Novo Processador\", informe Threads, Multi e Single para recalcular as notas automaticamente."
+        "Clique em \"Editar Critérios\" para ajustar pesos das notas, faixas de RAM e prioridades por categoria.",
+        "Em \"+ Novo Processador\", siga o protocolo CPU-Z (2 execuções) para recalcular as notas automaticamente."
       ]
     },
     {
@@ -3419,7 +3807,7 @@ function openAdminHelpModal() {
       tab: "alocacoes",
       title: "7. Alocações",
       items: [
-        "Histórico de entregas e devoluções; bloqueia alocar PC já em uso.",
+        "Histórico de entregas e devoluções; bloqueia alocar PC já em uso e inclui o botão \"Tutorial: Liberar PC\".",
         "Use \"Encerrar\" para liberar o PC mantendo todo o histórico."
       ]
     },
@@ -3434,7 +3822,7 @@ function openAdminHelpModal() {
       tab: "etiquetas",
       title: "9. Etiquetas",
       items: [
-        "Monte etiquetas de PCs ou Monitores na grade Pimaco 3×6 (18 posições/folha) em qualquer posição e quantidade.",
+        "Monte etiquetas de PCs, Monitores ou Placas / Livre na grade Pimaco 3×6 (18 posições/folha).",
         "Visualize a prévia em escala real e exporte em PDF (1:1) ou Word (.docx) pronto para imprimir."
       ]
     },
@@ -3449,7 +3837,7 @@ function openAdminHelpModal() {
       tab: "parametros",
       title: "11. Parâmetros & Log",
       items: [
-        "Ajusta pesos do score, ganho mínimo, anonimização pública e exibe o histórico completo de auditoria."
+        "Ajusta pesos do score, ganho mínimo, anonimização pública e exibe o histórico de auditoria (as Regras de Uso são editadas direto no botão \"Regras de Uso\" no topo)."
       ]
     }
   ];
@@ -3635,6 +4023,7 @@ async function init() {
     }
   });
 
+  document.getElementById("btn-usage-rules")?.addEventListener("click", openUsageRulesModal);
   document.getElementById("btn-admin-login").addEventListener("click", openLoginModal);
   document.getElementById("btn-admin-help").addEventListener("click", openAdminHelpModal);
   document.getElementById("btn-admin-logout").addEventListener("click", async () => {

@@ -262,6 +262,13 @@ SCHEMA_STATEMENTS = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
     """
+    CREATE TABLE IF NOT EXISTS site_contents (
+        `key` VARCHAR(191) PRIMARY KEY,
+        content LONGTEXT NOT NULL,
+        updated_at VARCHAR(100)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
     CREATE TABLE IF NOT EXISTS audit_log (
         id INT AUTO_INCREMENT PRIMARY KEY,
         timestamp VARCHAR(100) NOT NULL,
@@ -365,8 +372,25 @@ def ensure_default_map_stations(conn: MySQLConnectionWrapper) -> None:
     )
 
 
+DEFAULT_USAGE_RULES = """Regras internas do LSEE quanto ao uso dos computadores
+
+1- O usuário do computador tem total liberdade para instalar softwares gratuitos.
+
+2- Evite a instalação de software pagos, os quais não temos as licenças no laboratório. Favor verificar com o pessoal responsável pelos softwares sobre as licenças disponíveis.
+
+3- O usuário pode trocar a senha padrão de acesso ao computador. Contudo, não altere ou exclua a conta de administrador.
+Essa conta é necessária para que possamos limpar e reconfigurar o computador, uma vez que você não for mais utilizá-lo.
+
+4- Evite formatar o computador. Caso necessário, informe a equipe de alocação de recursos para fazermos isso com os técnicos da USP.
+
+Boa pesquisa!
+
+Atenciosamente,
+Equipe de alocação de recursos"""
+
+
 def ensure_default_params(conn: MySQLConnectionWrapper) -> None:
-    """Garante parâmetros do Cenário B e padroniza localizações conhecidas."""
+    """Garante parâmetros do Cenário B, conteúdos padrão e padroniza localizações conhecidas."""
     conn.execute("DELETE FROM system_params WHERE `key` = 'bonus_ssd_hd'")
     defaults = [
         ("armaz_peso_hd", "Peso relativo do HD (Armazenamento)", "0.25", "armazenamento"),
@@ -384,6 +408,10 @@ def ensure_default_params(conn: MySQLConnectionWrapper) -> None:
             f"UPDATE {tbl} SET localizacao = 'Sala do Servidor' WHERE localizacao = 'Sala do servidor e equipamentos'"
         )
     ensure_default_map_stations(conn)
+    conn.execute(
+        "INSERT IGNORE INTO site_contents(`key`, content, updated_at) VALUES (?, ?, '')",
+        ("usage_rules", DEFAULT_USAGE_RULES),
+    )
 
 
 def init_schema() -> None:

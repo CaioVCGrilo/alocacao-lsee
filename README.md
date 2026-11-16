@@ -1,6 +1,6 @@
 # LSEE · Alocação de Recursos (Web / Vercel + MySQL)
 
-Sistema web para consulta pública e gestão administrativa de computadores, pessoas, fila de prioridade, simulador de upgrade, monitores, etiquetas e rede do LSEE.
+Sistema web para consulta pública e gestão administrativa de computadores, mapa físico do laboratório, pessoas, fila de prioridade, simulador de upgrade, monitores, etiquetas de patrimônio e rede do LSEE.
 
 ## Requisitos
 
@@ -49,3 +49,8 @@ python server.py --set-password
 1. Importe o repositório na Vercel (entrypoint em `api/index.py`, configurado via `vercel.json`).
 2. Configure as Environment Variables no painel da Vercel: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` (e opcionalmente `LSEE_SESSION_SECRET`).
 3. Faça o deploy.
+
+## Principais Módulos
+
+- **Visão Pública (`/api/public/*`):** **Dashboard**, **Computadores**, **Mapa do LSEE** (somente leitura e anonimizado), **Simulador** de upgrade e modal **Regras de Uso**.
+- **Modo Administrador (`/api/admin/*`):** **Instruções**, edição de **Regras de Uso**, **Critérios** (edição manual de pesos das notas, regras gerais, faixas de RAM, prioridades por categoria e benchmarks de CPU com protocolo CPU-Z), **Pessoas**, **Alocações** (com checklist **Tutorial: Liberar PC**), **Monitores**, **Etiquetas** (PCs, Monitores, Placas e Livre em PDF 1:1 e `.docx`), **Rede**, edição do **Mapa do LSEE** e **Parâmetros & Log**.

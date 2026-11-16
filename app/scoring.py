@@ -114,6 +114,10 @@ def load_rules(conn: Any) -> Dict[str, Any]:
     ).fetchall()
     categories = {r["name"]: dict(r) for r in cat_rows}
 
+    def _num_param(key: str, default: float) -> float:
+        val = _to_float(params.get(key))
+        return val if val is not None else default
+
     armaz_peso_hd = _to_float(params.get("armaz_peso_hd"))
     armaz_escala_log = _to_float(params.get("armaz_escala_log"))
 
@@ -123,14 +127,14 @@ def load_rules(conn: Any) -> Dict[str, Any]:
         "thresholds": thresholds,
         "thresholds_rows": [dict(r) for r in thresh_rows],
         "categories": categories,
-        "peso_cpu": _to_float(params.get("peso_cpu")) or 0.45,
-        "peso_ram": _to_float(params.get("peso_ram")) or 0.30,
-        "peso_armazenamento": _to_float(params.get("peso_armazenamento")) or 0.225,
-        "peso_gpu": _to_float(params.get("peso_gpu")) or 0.025,
+        "peso_cpu": max(0.0, _num_param("peso_cpu", 0.45)),
+        "peso_ram": max(0.0, _num_param("peso_ram", 0.30)),
+        "peso_armazenamento": max(0.0, _num_param("peso_armazenamento", 0.225)),
+        "peso_gpu": max(0.0, _num_param("peso_gpu", 0.025)),
         "armaz_peso_hd": armaz_peso_hd if armaz_peso_hd is not None else 0.25,
         "armaz_escala_log": armaz_escala_log if armaz_escala_log and armaz_escala_log > 0 else 60.0,
-        "score_maximo": _to_float(params.get("score_maximo")) or 10.0,
-        "diff_min_upgrade": _to_float(params.get("diferenca_minima_upgrade")) or 3.0,
+        "score_maximo": _num_param("score_maximo", 10.0) or 10.0,
+        "diff_min_upgrade": max(0.0, _num_param("diferenca_minima_upgrade", 3.0)),
         "public_anonymize_names": params.get("public_anonymize_names", "Não") == "Sim",
     }
 
@@ -387,7 +391,7 @@ def compute_state(conn: Any) -> Dict[str, Any]:
         sem = _to_int(p["semestre_entrada"])
         if participa_upgrade == "Sim" and ano is not None and sem is not None:
             grp = cat_info.get("priority_group")
-            prefix = 100000 if grp == 1 else (200000 if grp == 2 else 900000)
+            prefix = (int(grp) * 100000) if (grp is not None and int(grp) >= 1) else 900000
             chave_prioridade: Optional[int] = prefix + ano * 10 + sem
             valid_keys.append(chave_prioridade)
         else:
