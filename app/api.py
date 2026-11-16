@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import mimetypes
 import webbrowser
@@ -24,6 +25,8 @@ from .config import DEFAULT_XLSX_PATH, SESSION_COOKIE_NAME, SESSION_TTL_SECONDS,
 from .db import DEFAULT_USAGE_RULES, db_session, ensure_default_map_stations
 from .importer import import_xlsx_into_db
 from .labels import build_labels_docx, build_labels_pdf, normalize_label_pages
+from .network_excel import build_network_xlsx, parse_network_xlsx
+from .requests_doc import build_request_docx, build_request_pdf, normalize_material_request
 from .scoring import build_score_summary, compute_state, simulate_upgrade
 
 
@@ -617,6 +620,136 @@ def _update_rules(conn: Any, body: Dict[str, Any]) -> None:
     )
 
 
+def _handle_network_import_xlsx(conn: Any, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Pré-visualiza ou importa lista de IPs a partir de um arquivo .xlsx enviado em base64."""
+    b64 = str(body.get("content_base64") or "").strip()
+    if not b64:
+        raise ValueError("Envie o arquivo .xlsx para importação.")
+    if "," in b64 and b64.startswith("data:"):
+        b64 = b64.split(",", 1)[1]
+    try:
+        raw_bytes = base64.b64decode(b64, validate=True)
+    except Exception as exc:
+        raise ValueError("Conteúdo do arquivo .xlsx inválido.") from exc
+    if len(raw_bytes) > 5_000_000:
+        raise ValueError("Arquivo .xlsx muito grande (limite: 5 MB).")
+
+    parsed = parse_network_xlsx(raw_bytes)
+    new_records = parsed["records"]
+
+    def _norm_key(cat: str, eq: str) -> tuple[str, str]:
+        return (" ".join((cat or "").lower().split()), " ".join((eq or "").lower().split()))
+
+    existing_rows = conn.execute(
+        "SELECT categoria, equipamento, ip, mac, observacoes FROM network_devices"
+    ).fetchall()
+    old_map = {_norm_key(r["categoria"], r["equipamento"]): dict(r) for r in existing_rows}
+    new_map = {_norm_key(r["categoria"], r["equipamento"]): r for r in new_records}
+
+    added = [r["equipamento"] for k, r in new_map.items() if k not in old_map]
+    removed = [r["equipamento"] for k, r in old_map.items() if k not in new_map]
+    updated = []
+    unchanged = 0
+    for k, nr in new_map.items():
+        if k not in old_map:
+            continue
+        orow = old_map[k]
+        if (
+            (orow.get("ip") or "") != nr["ip"]
+            or (orow.get("mac") or "").lower() != nr["mac"].lower()
+            or (orow.get("observacoes") or "") != nr["observacoes"]
+        ):
+            updated.append(nr["equipamento"])
+        else:
+            unchanged += 1
+
+    preview_only = bool(body.get("preview_only"))
+    if not preview_only:
+        conn.execute("DELETE FROM network_devices")
+        conn.executemany(
+            "INSERT INTO network_devices(categoria, equipamento, ip, mac, observacoes) VALUES (?, ?, ?, ?, ?)",
+            [
+                (r["categoria"], r["equipamento"], r["ip"], r["mac"], r["observacoes"])
+                for r in new_records
+            ],
+        )
+        filename = str(body.get("filename") or "Lista de IPs.xlsx").strip()
+        _log_audit(
+            conn,
+            "IMPORT_NETWORK_XLSX",
+            filename,
+            f"Aba '{parsed['sheet_name']}': {len(new_records)} registros ({len(added)} novos, {len(updated)} atualizados, {len(removed)} removidos)",
+        )
+
+    return {
+        "ok": True,
+        "applied": not preview_only,
+        "sheet_name": parsed["sheet_name"],
+        "total": len(new_records),
+        "counts_by_cat": parsed["counts_by_cat"],
+        "added": added,
+        "updated": updated,
+        "removed": removed,
+        "unchanged": unchanged,
+        "preview": new_records[:120],
+    }
+
+
+def _get_requests_payload(conn: Any) -> Dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT id, created_at, orientador, laboratorio, data_solicitacao,
+               items_json, total_valor, justificativa
+        FROM material_requests
+        ORDER BY id DESC
+        LIMIT 50
+        """
+    ).fetchall()
+    history = []
+    for r in rows:
+        try:
+            items = json.loads(r["items_json"] or "[]")
+        except Exception:
+            items = []
+        history.append(
+            {
+                "id": r["id"],
+                "created_at": r["created_at"],
+                "orientador": r["orientador"] or "",
+                "laboratorio": r["laboratorio"] or "",
+                "data_solicitacao": r["data_solicitacao"] or "",
+                "items": items,
+                "total_valor": r["total_valor"],
+                "justificativa": r["justificativa"] or "",
+            }
+        )
+
+    pc_opts = conn.execute(
+        "SELECT id_pc, patrimonio, tipo_de_uso, localizacao FROM computers WHERE id_pc IS NOT NULL ORDER BY id_pc"
+    ).fetchall()
+    mon_opts = conn.execute(
+        "SELECT id_monitor, patrimonio, marca_modelo FROM monitors ORDER BY id_monitor"
+    ).fetchall()
+    equipments = [
+        {
+            "label": f"{r['id_pc']} ({r['tipo_de_uso'] or 'PC'}) — Patr. {r['patrimonio']}",
+            "patrimonio": (r["patrimonio"] or "").strip(),
+            "tipo": "PC",
+        }
+        for r in pc_opts
+        if (r["patrimonio"] or "").strip()
+    ] + [
+        {
+            "label": f"{r['id_monitor']} ({r['marca_modelo'] or 'Monitor'}) — Patr. {r['patrimonio']}",
+            "patrimonio": (r["patrimonio"] or "").strip(),
+            "tipo": "Monitor",
+        }
+        for r in mon_opts
+        if (r["patrimonio"] or "").strip()
+    ]
+    return {"items": history, "equipment_options": equipments}
+
+
 def _free_simulator_pcs(state: Dict[str, Any]) -> list[Dict[str, Any]]:
     """Retorna apenas PCs com status 'Livre' ordenados por score decrescente."""
     pcs = [
@@ -1129,6 +1262,26 @@ class LSEEController:
                 self._send_json({"items": rows})
                 return
 
+            if path == "/api/admin/network/export-xlsx":
+                rows = [
+                    dict(r)
+                    for r in conn.execute(
+                        "SELECT categoria, equipamento, ip, mac, observacoes FROM network_devices ORDER BY id"
+                    ).fetchall()
+                ]
+                content = build_network_xlsx(rows)
+                _log_audit(conn, "EXPORT_NETWORK_XLSX", f"{len(rows)} equips", "Lista de IPs exportada em Excel (.xlsx)")
+                self._send_binary(
+                    content,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    f"Lista_de_IPs_LSEE_{_today_str()}.xlsx",
+                )
+                return
+
+            if path == "/api/admin/requests":
+                self._send_json(_get_requests_payload(conn))
+                return
+
             if path == "/api/admin/params":
                 state = compute_state(conn)
                 self._send_json(
@@ -1530,6 +1683,56 @@ class LSEEController:
                 self._send_json({"id": cur.lastrowid}, status=HTTPStatus.CREATED)
                 return
 
+            if path == "/api/admin/network/import-xlsx":
+                res = _handle_network_import_xlsx(conn, body)
+                self._send_json(res)
+                return
+
+            if path == "/api/admin/requests":
+                req = normalize_material_request(body)
+                now = _now_iso()
+                cur = conn.execute(
+                    """
+                    INSERT INTO material_requests(
+                        created_at, orientador, laboratorio, data_solicitacao,
+                        items_json, total_valor, justificativa
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        now,
+                        req["orientador"],
+                        req["laboratorio"],
+                        req["data_solicitacao"],
+                        json.dumps(req["items"], ensure_ascii=False),
+                        req["total_valor"],
+                        req["justificativa"],
+                    ),
+                )
+                _log_audit(
+                    conn,
+                    "CREATE_MATERIAL_REQUEST",
+                    f"req#{cur.lastrowid}",
+                    f"{len(req['items'])} itens · Total={req['total_fmt'] or '-'}",
+                )
+                self._send_json({"ok": True, "id": cur.lastrowid}, status=HTTPStatus.CREATED)
+                return
+
+            if path in ("/api/admin/requests/pdf", "/api/admin/requests/docx"):
+                req = normalize_material_request(body)
+                if path.endswith("/pdf"):
+                    content = build_request_pdf(req)
+                    _log_audit(conn, "EXPORT_REQUEST_PDF", f"{len(req['items'])} itens", "Solicitação exportada em PDF")
+                    self._send_binary(content, "application/pdf", f"Solicitacao_Auxilio_LSEE_{_today_str()}.pdf")
+                else:
+                    content = build_request_docx(req)
+                    _log_audit(conn, "EXPORT_REQUEST_DOCX", f"{len(req['items'])} itens", "Solicitação exportada em Word (.docx)")
+                    self._send_binary(
+                        content,
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        f"Solicitacao_Auxilio_LSEE_{_today_str()}.docx",
+                    )
+                return
+
             if path == "/api/admin/map/swap":
                 info = _swap_map_stations(conn, body)
                 state = compute_state(conn)
@@ -1723,6 +1926,12 @@ class LSEEController:
                 net_pk = int(path.split("/")[4])
                 conn.execute("DELETE FROM network_devices WHERE id = ?", (net_pk,))
                 _log_audit(conn, "DELETE_NETWORK", f"row#{net_pk}", "Dispositivo de rede removido")
+                self._send_json({"ok": True})
+                return
+            if path.startswith("/api/admin/requests/"):
+                req_pk = int(path.split("/")[4])
+                conn.execute("DELETE FROM material_requests WHERE id = ?", (req_pk,))
+                _log_audit(conn, "DELETE_MATERIAL_REQUEST", f"req#{req_pk}", "Solicitação removida")
                 self._send_json({"ok": True})
                 return
             self._send_json({"error": "Rota DELETE administrativa não encontrada."}, status=HTTPStatus.NOT_FOUND)

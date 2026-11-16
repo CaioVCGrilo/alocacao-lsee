@@ -57,6 +57,19 @@ const state = {
     selectedSlot: 0,
     pages: [Array(18).fill(null)],
   },
+  requests: {
+    orientador: "",
+    laboratorio: "LSEE",
+    data_solicitacao: new Date().toISOString().slice(0, 10),
+    blankDate: false,
+    items: [
+      { material: "", quantidade: "", patrimonio: "", valor: "" },
+      { material: "", quantidade: "", patrimonio: "", valor: "" },
+      { material: "", quantidade: "", patrimonio: "", valor: "" },
+    ],
+    justificativa: "",
+    equipmentOptions: [],
+  },
   caches: {
     computers: [],
     processors: [],
@@ -276,13 +289,16 @@ async function apiFetch(url, options = {}) {
   return data;
 }
 
-async function apiDownload(url, payload, fallbackFilename) {
-  const resp = await fetch(url, {
-    method: "POST",
+async function apiDownload(url, payload = null, fallbackFilename = "download") {
+  const opts = {
+    method: payload === null ? "GET" : "POST",
     credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  };
+  if (payload !== null) {
+    opts.headers = { "Content-Type": "application/json" };
+    opts.body = JSON.stringify(payload);
+  }
+  const resp = await fetch(url, opts);
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
     throw new Error(err.error || `Erro HTTP ${resp.status}`);
@@ -560,6 +576,9 @@ async function loadActiveTab() {
         break;
       case "rede":
         await renderNetwork();
+        break;
+      case "solicitacoes":
+        await renderRequests();
         break;
       case "parametros":
         await renderParamsAndAudit();
@@ -3571,7 +3590,11 @@ async function renderNetwork() {
     <div class="card">
       <div class="card-header">
         <h2 class="card-title">Cadastro de Rede — IP / MAC (${filtered.length})</h2>
-        <button id="btn-new-net" class="btn btn-primary btn-sm" type="button">+ Novo Equipamento</button>
+        <span class="row-actions">
+          <button id="btn-net-import" class="btn btn-secondary btn-sm" type="button">Importar .xlsx</button>
+          <button id="btn-net-export" class="btn btn-secondary btn-sm" type="button">Exportar Excel (.xlsx)</button>
+          <button id="btn-new-net" class="btn btn-primary btn-sm" type="button">+ Novo Equipamento</button>
+        </span>
       </div>
       <div class="card-body">
         <div class="toolbar">
@@ -3622,6 +3645,15 @@ async function renderNetwork() {
     state.redeFilters.categoria = e.target.value;
     renderNetwork();
   });
+  document.getElementById("btn-net-import").addEventListener("click", openImportNetworkModal);
+  document.getElementById("btn-net-export").addEventListener("click", async () => {
+    try {
+      await apiDownload("/api/admin/network/export-xlsx", null, "Lista_de_IPs_LSEE.xlsx");
+      showToast("Planilha .xlsx da lista de IPs gerada!");
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  });
   document.getElementById("btn-new-net").addEventListener("click", () => openNetworkModal(null));
   el.querySelectorAll(".js-edit-net").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -3635,6 +3667,499 @@ async function renderNetwork() {
       await apiFetch(`/api/admin/network/${btn.dataset.id}`, { method: "DELETE" });
       showToast("Registro removido.");
       renderNetwork();
+    });
+  });
+}
+
+function openImportNetworkModal() {
+  let pendingB64 = "";
+  let pendingName = "";
+  openModal("Importar Lista de IPs (.xlsx)", `
+    <p class="help-intro" style="margin-top:0;">
+      Envie a planilha <strong>Lista de IPs.xlsx</strong> (da Roseli ou exportada pelo sistema) para conferir as alterações antes de aplicar.
+    </p>
+    <div class="form-field">
+      <label for="net-xlsx-file">Selecionar arquivo .xlsx</label>
+      <input id="net-xlsx-file" class="input" type="file" accept=".xlsx" />
+    </div>
+    <div id="net-import-preview" style="margin-top:12px;"></div>
+    <div class="form-actions">
+      <button class="btn btn-secondary" type="button" onclick="closeModal()">Cancelar</button>
+      <button id="btn-net-import-apply" class="btn btn-primary" type="button" disabled>Confirmar Importação</button>
+    </div>
+  `, true);
+
+  document.getElementById("net-xlsx-file").addEventListener("change", (e) => {
+    const file = e.target.files?.[0];
+    const previewEl = document.getElementById("net-import-preview");
+    const applyBtn = document.getElementById("btn-net-import-apply");
+    applyBtn.disabled = true;
+    if (!file) {
+      previewEl.innerHTML = "";
+      return;
+    }
+    pendingName = file.name;
+    previewEl.innerHTML = '<p class="muted">Lendo planilha e comparando com o cadastro atual...</p>';
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const dataUrl = String(reader.result || "");
+        pendingB64 = dataUrl.includes(",") ? dataUrl.split(",", 2)[1] : dataUrl;
+        const res = await apiFetch("/api/admin/network/import-xlsx", {
+          method: "POST",
+          body: JSON.stringify({
+            filename: pendingName,
+            content_base64: pendingB64,
+            preview_only: true,
+          }),
+        });
+        const catSummary = Object.entries(res.counts_by_cat || {})
+          .map(([k, v]) => `${esc(k)}: <strong>${v}</strong>`)
+          .join(" · ");
+        previewEl.innerHTML = `
+          <div class="notice" style="margin-bottom:8px;">
+            <strong>Aba lida:</strong> <span class="mono">${esc(res.sheet_name)}</span> · <strong>${res.total}</strong> registros (${catSummary})<br />
+            Novos: <strong>${res.added.length}</strong> · Atualizados: <strong>${res.updated.length}</strong> · Sem alteração: <strong>${res.unchanged}</strong> · Removidos: <strong>${res.removed.length}</strong>
+          </div>
+          ${res.added.length ? `<p style="font-size:0.82rem;margin:4px 0;"><strong>Novos:</strong> ${esc(res.added.join(", "))}</p>` : ""}
+          ${res.updated.length ? `<p style="font-size:0.82rem;margin:4px 0;"><strong>Atualizados:</strong> ${esc(res.updated.join(", "))}</p>` : ""}
+          ${res.removed.length ? `<p style="font-size:0.82rem;margin:4px 0;"><strong>Removidos:</strong> ${esc(res.removed.join(", "))}</p>` : ""}
+        `;
+        applyBtn.disabled = false;
+      } catch (err) {
+        pendingB64 = "";
+        previewEl.innerHTML = `<p class="muted" style="color:var(--danger);">${esc(err.message)}</p>`;
+      }
+    };
+    reader.readAsDataURL(file);
+  });
+
+  document.getElementById("btn-net-import-apply").addEventListener("click", async () => {
+    if (!pendingB64) return;
+    try {
+      const res = await apiFetch("/api/admin/network/import-xlsx", {
+        method: "POST",
+        body: JSON.stringify({
+          filename: pendingName,
+          content_base64: pendingB64,
+          preview_only: false,
+        }),
+      });
+      closeModal();
+      showToast(`Lista de IPs atualizada (${res.total} registros)!`);
+      renderNetwork();
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  });
+}
+
+/* ==================== SOLICITAÇÕES DE MATERIAL (ADMIN) ==================== */
+const PT_MONTHS_JS = [
+  "", "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+  "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+];
+
+function parseMoneyVal(raw) {
+  const s = String(raw ?? "").replace(/R\$/gi, "").trim();
+  if (!s) return null;
+  const cleaned = s.includes(",") && s.includes(".")
+    ? s.replace(/\./g, "").replace(",", ".")
+    : s.replace(",", ".");
+  const n = Number(cleaned);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function fmtBrlJs(num) {
+  if (num === null || num === undefined || !Number.isFinite(num)) return "";
+  return `R$ ${num.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function fmtReqDateJs(rs) {
+  if (rs.blankDate || !(rs.data_solicitacao || "").trim()) {
+    return "São Carlos,______ de _____________ de _______";
+  }
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(rs.data_solicitacao.trim());
+  if (m) {
+    const mo = Number(m[2]);
+    if (mo >= 1 && mo <= 12) {
+      return `São Carlos, ${m[3]} de ${PT_MONTHS_JS[mo]} de ${m[1]}`;
+    }
+  }
+  return `São Carlos, ${rs.data_solicitacao}`;
+}
+
+function buildRequestPreviewHtml(rs) {
+  const filled = (rs.items || []).filter(
+    (it) => (it.material || "").trim() || (it.quantidade || "").trim() || (it.patrimonio || "").trim() || String(it.valor ?? "").trim()
+  );
+  const totalRows = Math.max(8, filled.length);
+  let totalSum = 0;
+  let hasPrice = false;
+  filled.forEach((it) => {
+    const p = parseMoneyVal(it.valor);
+    if (p !== null) {
+      hasPrice = true;
+      totalSum += p;
+    }
+  });
+
+  const rowsHtml = Array.from({ length: totalRows }, (_, idx) => {
+    const it = filled[idx];
+    if (!it) return '<tr class="is-blank"><td></td><td></td><td></td><td></td></tr>';
+    const p = parseMoneyVal(it.valor);
+    return `
+      <tr>
+        <td>${esc(it.material)}</td>
+        <td style="text-align:center;">${esc(it.quantidade)}</td>
+        <td style="text-align:center;">${esc(it.patrimonio)}</td>
+        <td style="text-align:right;">${p !== null ? esc(fmtBrlJs(p)) : ""}</td>
+      </tr>
+    `;
+  }).join("");
+
+  return `
+    <div class="req-paper-preview">
+      <div class="req-paper-head">
+        <img src="/static/img/eesc_usp_logo.png" alt="EESC USP" />
+        <div class="req-paper-inst">
+          <div>UNIVERSIDADE DE SÃO PAULO</div>
+          <div>ESCOLA DE ENGENHARIA DE SÃO CARLOS</div>
+          <div>DEPARTAMENTO DE ENGENHARIA ELÉTRICA E DE COMPUTAÇÃO</div>
+          <div>PROGRAMA DE PÓS-GRADUAÇÃO EM ENGENHARIA ELÉTRICA</div>
+        </div>
+      </div>
+      <div class="req-paper-title">SOLICITAÇÃO DE AUXÍLIO<br />PARA LABORATÓRIO DE PESQUISA</div>
+      <div class="req-paper-box">
+        <div class="req-paper-box-row"><strong>Orientador:</strong> ${esc(rs.orientador)}</div>
+        <div class="req-paper-box-row"><strong>Laboratório:</strong> ${esc(rs.laboratorio)}</div>
+      </div>
+      <table class="req-paper-tbl">
+        <thead>
+          <tr><th colspan="4" style="font-weight:400;text-align:center;">MATERIAL SOLICITADO</th></tr>
+          <tr>
+            <th style="width:44%;">Material</th>
+            <th style="width:18%;">Quantidade</th>
+            <th style="width:20%;">Patrimônio</th>
+            <th style="width:18%;">Valor R$</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rowsHtml}
+          <tr>
+            <td></td>
+            <td></td>
+            <td style="text-align:right;font-weight:700;">Total</td>
+            <td style="text-align:right;font-weight:700;">${hasPrice ? esc(fmtBrlJs(totalSum)) : ""}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="req-paper-obs">Obs.: Numero de patrimônios dos bens para tonners e suprimentos de informática</div>
+      <div class="req-paper-box">
+        <div class="req-paper-box-row" style="text-align:center;font-weight:700;">JUSTIFICATIVA</div>
+        <div class="req-paper-just-body">${esc(rs.justificativa)}</div>
+      </div>
+      <div class="req-paper-footer">${esc(fmtReqDateJs(rs))}</div>
+      <div class="req-paper-sig">Assinatura</div>
+    </div>
+  `;
+}
+
+function buildRequestApiPayload(rs) {
+  return {
+    orientador: rs.orientador || "",
+    laboratorio: rs.laboratorio || "",
+    data_solicitacao: rs.blankDate ? "" : (rs.data_solicitacao || ""),
+    items: (rs.items || []).map((it) => ({
+      material: it.material || "",
+      quantidade: it.quantidade || "",
+      patrimonio: it.patrimonio || "",
+      valor: it.valor ?? "",
+    })),
+    justificativa: rs.justificativa || "",
+  };
+}
+
+async function renderRequests() {
+  const el = document.getElementById("tab-solicitacoes");
+  const data = await apiFetch("/api/admin/requests");
+  const rs = state.requests;
+  rs.equipmentOptions = data.equipment_options || [];
+  const history = data.items || [];
+
+  const renderItemRow = (it, idx) => `
+    <div class="req-item-card js-req-item-row" data-idx="${idx}">
+      <div class="req-item-grid">
+        <input class="input js-req-mat" data-idx="${idx}" placeholder="Descrição do material (ex.: Toner HP, Cabo HDMI)" value="${esc(it.material)}" />
+        <input class="input js-req-qtd" data-idx="${idx}" placeholder="Qtd." value="${esc(it.quantidade)}" />
+        <input class="input js-req-val" data-idx="${idx}" placeholder="Valor R$" value="${esc(it.valor ?? "")}" title="Valor total deste item em R$" />
+        <button class="btn btn-sm btn-danger js-req-del-row" data-idx="${idx}" type="button" title="Remover item">&times;</button>
+      </div>
+      <div class="req-item-subgrid">
+        <input class="input mono js-req-pat" data-idx="${idx}" placeholder="Patrimônio" value="${esc(it.patrimonio)}" />
+        <select class="select js-req-pat-pick" data-idx="${idx}" aria-label="Puxar patrimônio do inventário">
+          <option value="">-- Puxar patrimônio do inventário (opcional) --</option>
+          ${rs.equipmentOptions.map((eq) => `<option value="${esc(eq.patrimonio)}">${esc(eq.label)}</option>`).join("")}
+        </select>
+      </div>
+    </div>
+  `;
+
+  el.innerHTML = `
+    <div class="requests-layout">
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">Criar Solicitação de Material (EESC / USP)</h2>
+          <button id="btn-req-clear" class="btn btn-secondary btn-sm" type="button">Limpar</button>
+        </div>
+        <div class="card-body">
+          <div class="form-grid" style="margin-bottom:10px;">
+            <div class="form-field">
+              <label for="req-orientador">Orientador</label>
+              <input id="req-orientador" class="input" value="${esc(rs.orientador)}" placeholder="Nome do professor orientador" />
+            </div>
+            <div class="form-field">
+              <label for="req-laboratorio">Laboratório</label>
+              <input id="req-laboratorio" class="input" value="${esc(rs.laboratorio)}" placeholder="LSEE" />
+            </div>
+            <div class="form-field">
+              <label for="req-date">Data (São Carlos)</label>
+              <input id="req-date" class="input" type="date" value="${esc(rs.data_solicitacao)}" ${rs.blankDate ? "disabled" : ""} />
+            </div>
+            <div class="form-field" style="justify-content:flex-end;">
+              <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                <input id="req-blank-date" type="checkbox" ${rs.blankDate ? "checked" : ""} /> Deixar data em branco p/ assinar depois
+              </label>
+            </div>
+          </div>
+
+          <div class="card-header" style="padding:8px 0;border:none;">
+            <strong style="font-size:0.88rem;">Material Solicitado</strong>
+            <button id="btn-req-add-row" class="btn btn-secondary btn-sm" type="button">+ Adicionar item</button>
+          </div>
+          <div id="req-items-container" class="req-items-wrap">
+            ${rs.items.map(renderItemRow).join("")}
+          </div>
+
+          <div class="form-field" style="margin-top:12px;">
+            <label for="req-just">Justificativa</label>
+            <textarea id="req-just" class="input" rows="3" style="width:100%;resize:vertical;" placeholder="Descreva a necessidade dos materiais para o laboratório...">${esc(rs.justificativa)}</textarea>
+          </div>
+
+          <div class="labels-btn-row" style="margin-top:14px;">
+            <button id="btn-req-save" class="btn btn-secondary" type="button">Salvar no Histórico</button>
+            <button id="btn-req-pdf" class="btn btn-primary" type="button">Exportar PDF</button>
+            <button id="btn-req-docx" class="btn btn-secondary" type="button">Exportar Word (.docx)</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h2 class="card-title">Prévia do Formulário Oficial</h2></div>
+        <div class="card-body" id="req-preview-slot">
+          ${buildRequestPreviewHtml(rs)}
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+      <div class="card-header"><h2 class="card-title">Histórico de Solicitações Salvas (${history.length})</h2></div>
+      <div class="card-body">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Criado em</th>
+                <th>Orientador</th>
+                <th>Laboratório</th>
+                <th>Itens</th>
+                <th>Total</th>
+                <th>Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${history.map((h) => `
+                <tr>
+                  <td class="mono">${esc((h.created_at || "").slice(0, 10))}</td>
+                  <td>${esc(h.orientador || "—")}</td>
+                  <td>${esc(h.laboratorio || "—")}</td>
+                  <td>${esc((h.items || []).map((i) => i.material).join("; ") || "—")}</td>
+                  <td class="mono">${h.total_valor !== null && h.total_valor !== undefined ? esc(fmtBrlJs(Number(h.total_valor))) : "—"}</td>
+                  <td>
+                    <span class="row-actions">
+                      <button class="btn btn-sm btn-secondary js-req-load" data-id="${h.id}" type="button">Carregar</button>
+                      <button class="btn btn-sm btn-primary js-req-hist-pdf" data-id="${h.id}" type="button">PDF</button>
+                      <button class="btn btn-sm btn-secondary js-req-hist-docx" data-id="${h.id}" type="button">Word</button>
+                      <button class="btn btn-sm btn-danger js-req-hist-del" data-id="${h.id}" type="button">Excluir</button>
+                    </span>
+                  </td>
+                </tr>
+              `).join("") || '<tr><td colspan="6" class="muted">Nenhuma solicitação salva ainda.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const refreshPreview = () => {
+    const slot = document.getElementById("req-preview-slot");
+    if (slot) slot.innerHTML = buildRequestPreviewHtml(rs);
+  };
+
+  document.getElementById("req-orientador").addEventListener("input", (e) => {
+    rs.orientador = e.target.value;
+    refreshPreview();
+  });
+  document.getElementById("req-laboratorio").addEventListener("input", (e) => {
+    rs.laboratorio = e.target.value;
+    refreshPreview();
+  });
+  document.getElementById("req-date").addEventListener("change", (e) => {
+    rs.data_solicitacao = e.target.value;
+    refreshPreview();
+  });
+  document.getElementById("req-blank-date").addEventListener("change", (e) => {
+    rs.blankDate = Boolean(e.target.checked);
+    document.getElementById("req-date").disabled = rs.blankDate;
+    refreshPreview();
+  });
+  document.getElementById("req-just").addEventListener("input", (e) => {
+    rs.justificativa = e.target.value;
+    refreshPreview();
+  });
+
+  el.querySelectorAll(".js-req-mat").forEach((inp) => {
+    inp.addEventListener("input", () => {
+      rs.items[Number(inp.dataset.idx)].material = inp.value;
+      refreshPreview();
+    });
+  });
+  el.querySelectorAll(".js-req-qtd").forEach((inp) => {
+    inp.addEventListener("input", () => {
+      rs.items[Number(inp.dataset.idx)].quantidade = inp.value;
+      refreshPreview();
+    });
+  });
+  el.querySelectorAll(".js-req-val").forEach((inp) => {
+    inp.addEventListener("input", () => {
+      rs.items[Number(inp.dataset.idx)].valor = inp.value;
+      refreshPreview();
+    });
+  });
+  el.querySelectorAll(".js-req-pat").forEach((inp) => {
+    inp.addEventListener("input", () => {
+      rs.items[Number(inp.dataset.idx)].patrimonio = inp.value;
+      refreshPreview();
+    });
+  });
+  el.querySelectorAll(".js-req-pat-pick").forEach((sel) => {
+    sel.addEventListener("change", () => {
+      const idx = Number(sel.dataset.idx);
+      const val = sel.value;
+      if (!val) return;
+      rs.items[idx].patrimonio = val;
+      const patInp = el.querySelector(`.js-req-pat[data-idx="${idx}"]`);
+      if (patInp) patInp.value = val;
+      refreshPreview();
+    });
+  });
+  el.querySelectorAll(".js-req-del-row").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (rs.items.length <= 1) {
+        rs.items[0] = { material: "", quantidade: "", patrimonio: "", valor: "" };
+      } else {
+        rs.items.splice(Number(btn.dataset.idx), 1);
+      }
+      renderRequests();
+    });
+  });
+
+  document.getElementById("btn-req-add-row").addEventListener("click", () => {
+    if (rs.items.length >= 15) {
+      showToast("Máximo de 15 itens por solicitação.", true);
+      return;
+    }
+    rs.items.push({ material: "", quantidade: "", patrimonio: "", valor: "" });
+    renderRequests();
+  });
+
+  document.getElementById("btn-req-clear").addEventListener("click", () => {
+    rs.orientador = "";
+    rs.laboratorio = "LSEE";
+    rs.data_solicitacao = new Date().toISOString().slice(0, 10);
+    rs.blankDate = false;
+    rs.items = [
+      { material: "", quantidade: "", patrimonio: "", valor: "" },
+      { material: "", quantidade: "", patrimonio: "", valor: "" },
+      { material: "", quantidade: "", patrimonio: "", valor: "" },
+    ];
+    rs.justificativa = "";
+    renderRequests();
+  });
+
+  const exportReq = async (fmt, customPayload = null) => {
+    const ext = fmt === "pdf" ? "pdf" : "docx";
+    try {
+      await apiDownload(`/api/admin/requests/${ext}`, customPayload || buildRequestApiPayload(rs), `Solicitacao_Auxilio_LSEE.${ext}`);
+      showToast(`Solicitação gerada em .${ext}!`);
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  };
+
+  document.getElementById("btn-req-save").addEventListener("click", async () => {
+    try {
+      await apiFetch("/api/admin/requests", {
+        method: "POST",
+        body: JSON.stringify(buildRequestApiPayload(rs)),
+      });
+      showToast("Solicitação salva no histórico!");
+      renderRequests();
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  });
+  document.getElementById("btn-req-pdf").addEventListener("click", () => exportReq("pdf"));
+  document.getElementById("btn-req-docx").addEventListener("click", () => exportReq("docx"));
+
+  el.querySelectorAll(".js-req-load").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const h = history.find((x) => x.id === Number(btn.dataset.id));
+      if (!h) return;
+      rs.orientador = h.orientador || "";
+      rs.laboratorio = h.laboratorio || "";
+      rs.data_solicitacao = h.data_solicitacao || "";
+      rs.blankDate = !h.data_solicitacao;
+      rs.items = (h.items && h.items.length ? h.items : [{ material: "", quantidade: "", patrimonio: "", valor: "" }]).map((i) => ({
+        material: i.material || "",
+        quantidade: i.quantidade || "",
+        patrimonio: i.patrimonio || "",
+        valor: i.valor !== null && i.valor !== undefined ? String(i.valor) : "",
+      }));
+      rs.justificativa = h.justificativa || "";
+      renderRequests();
+      showToast("Solicitação carregada no editor.");
+    });
+  });
+  el.querySelectorAll(".js-req-hist-pdf").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const h = history.find((x) => x.id === Number(btn.dataset.id));
+      if (h) exportReq("pdf", h);
+    });
+  });
+  el.querySelectorAll(".js-req-hist-docx").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const h = history.find((x) => x.id === Number(btn.dataset.id));
+      if (h) exportReq("docx", h);
+    });
+  });
+  el.querySelectorAll(".js-req-hist-del").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("Remover esta solicitação do histórico?")) return;
+      await apiFetch(`/api/admin/requests/${btn.dataset.id}`, { method: "DELETE" });
+      showToast("Solicitação removida.");
+      renderRequests();
     });
   });
 }
@@ -3830,12 +4355,19 @@ function openAdminHelpModal() {
       tab: "rede",
       title: "10. Rede (IP / MAC)",
       items: [
-        "Tabela interna de IPs e endereços MAC (apenas consulta cadastral; não altera scores)."
+        "Tabela interna de IPs e MACs com exportação em Excel (.xlsx) para a Roseli e importação com prévia."
+      ]
+    },
+    {
+      tab: "solicitacoes",
+      title: "11. Solicitações",
+      items: [
+        "Gere solicitações oficiais EESC/USP de material de consumo com preenchimento automático de patrimônio, histórico e exportação em PDF ou Word (.docx)."
       ]
     },
     {
       tab: "parametros",
-      title: "11. Parâmetros & Log",
+      title: "12. Parâmetros & Log",
       items: [
         "Ajusta pesos do score, ganho mínimo, anonimização pública e exibe o histórico de auditoria (as Regras de Uso são editadas direto no botão \"Regras de Uso\" no topo)."
       ]

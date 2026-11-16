@@ -269,6 +269,18 @@ SCHEMA_STATEMENTS = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
     """
+    CREATE TABLE IF NOT EXISTS material_requests (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        created_at VARCHAR(100) NOT NULL,
+        orientador VARCHAR(255),
+        laboratorio VARCHAR(255),
+        data_solicitacao VARCHAR(100),
+        items_json LONGTEXT NOT NULL,
+        total_valor DOUBLE,
+        justificativa LONGTEXT
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
     CREATE TABLE IF NOT EXISTS audit_log (
         id INT AUTO_INCREMENT PRIMARY KEY,
         timestamp VARCHAR(100) NOT NULL,

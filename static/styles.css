@@ -1532,8 +1532,144 @@ tbody tr:hover {
   border-color: #f04438;
 }
 
+/* ==================== SOLICITAÇÕES DE MATERIAL ==================== */
+.requests-layout {
+  display: grid;
+  grid-template-columns: minmax(380px, 1.05fr) minmax(420px, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.req-items-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.req-item-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-alt);
+  padding: 8px 10px;
+}
+
+.req-item-grid {
+  display: grid;
+  grid-template-columns: 1fr 84px 108px 34px;
+  gap: 6px;
+  align-items: center;
+}
+
+.req-item-subgrid {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 6px;
+  margin-top: 6px;
+  align-items: center;
+}
+
+.req-paper-preview {
+  background: #ffffff;
+  color: #111827;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.08);
+  padding: 22px 24px;
+  font-family: "Times New Roman", Times, serif;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.req-paper-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.req-paper-head img {
+  width: 44px;
+  height: auto;
+  flex-shrink: 0;
+}
+
+.req-paper-inst {
+  font-size: 9.5px;
+  line-height: 1.3;
+}
+
+.req-paper-title {
+  text-align: center;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.2px;
+  margin: 8px 0 12px;
+}
+
+.req-paper-box {
+  border: 3px double #111827;
+  margin-bottom: 10px;
+}
+
+.req-paper-box-row {
+  padding: 6px 8px;
+  border-bottom: 1px solid #111827;
+  font-size: 11.5px;
+}
+
+.req-paper-box-row:last-child {
+  border-bottom: none;
+}
+
+.req-paper-tbl {
+  width: 100%;
+  border-collapse: collapse;
+  border: 3px double #111827;
+  font-size: 11px;
+}
+
+.req-paper-tbl th,
+.req-paper-tbl td {
+  border: 1px solid #111827;
+  padding: 4px 6px;
+  min-height: 20px;
+}
+
+.req-paper-tbl tr.is-blank td {
+  height: 20px;
+}
+
+.req-paper-obs {
+  color: #dc2626;
+  font-size: 11px;
+  margin: 8px 0 10px;
+}
+
+.req-paper-just-body {
+  padding: 7px 8px;
+  min-height: 54px;
+  white-space: pre-wrap;
+  font-size: 11.5px;
+}
+
+.req-paper-footer {
+  margin-top: 14px;
+  text-align: right;
+  font-size: 11px;
+}
+
+.req-paper-sig {
+  margin: 26px 0 0 auto;
+  width: 210px;
+  border-top: 1px solid #111827;
+  text-align: center;
+  padding-top: 3px;
+  font-size: 10.5px;
+}
+
 @media (max-width: 1040px) {
-  .labels-layout {
+  .labels-layout,
+  .requests-layout {
     grid-template-columns: 1fr;
   }
 }
