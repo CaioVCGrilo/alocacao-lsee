@@ -1345,6 +1345,13 @@ tbody tr:hover {
   justify-content: center;
 }
 
+.labels-paper-stage {
+  position: relative;
+  width: 630px;
+  height: 891px;
+  flex-shrink: 0;
+}
+
 /* Escala exata 1 mm = 3 px do gabarito Pimaco A4 3x6 (210 x 297 mm) */
 .labels-a4-paper {
   position: relative;
@@ -1357,6 +1364,7 @@ tbody tr:hover {
   box-shadow: 0 10px 28px rgba(10, 34, 51, 0.14);
   box-sizing: border-box;
   flex-shrink: 0;
+  transform-origin: top left;
 }
 
 .labels-grid {
@@ -1962,6 +1970,24 @@ tbody tr:hover {
   margin-bottom: 12px;
 }
 
+.public-responsibles {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  color: var(--brand-deep);
+  font-size: 0.78rem;
+  line-height: 1.2;
+}
+
+.public-responsibles strong {
+  color: var(--brand);
+  font-weight: 700;
+}
+
 @media (max-width: 720px) {
   .topbar {
     position: static;
@@ -2175,8 +2201,22 @@ tbody tr:hover {
   }
 
   .labels-paper-wrap {
-    justify-content: flex-start;
-    padding: 10px;
+    justify-content: center;
+    padding: 8px;
+    overflow-x: hidden;
+  }
+
+  .labels-free-line-row {
+    grid-template-columns: minmax(90px, 0.42fr) 1fr;
+  }
+
+  .label-slot.is-filled .label-slot-clear {
+    opacity: 0.92;
+  }
+
+  .public-responsibles {
+    max-width: 100%;
+    flex-wrap: wrap;
   }
 
   .labels-btn-row .btn {

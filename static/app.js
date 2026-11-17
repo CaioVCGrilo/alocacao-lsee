@@ -48,6 +48,7 @@ const state = {
   isAdmin: false,
   needsBootstrap: false,
   currentUser: null,
+  publicResponsibles: [],
   activeTab: "dashboard",
   collab: {
     online_admins: [],
@@ -843,6 +844,20 @@ function syncMobileTabSelect() {
   }
 }
 
+function renderPublicResponsibles() {
+  const el = document.getElementById("public-responsibles");
+  if (!el) return;
+  const names = (state.publicResponsibles || []).map((n) => String(n || "").trim()).filter(Boolean);
+  if (state.isAdmin || names.length === 0) {
+    el.classList.add("hidden");
+    el.innerHTML = "";
+    return;
+  }
+  el.classList.remove("hidden");
+  const prefix = names.length === 1 ? "Responsável:" : "Responsáveis:";
+  el.innerHTML = `<span class="muted">${prefix}</span> <strong>${esc(names.join(", "))}</strong>`;
+}
+
 function updateAuthUI() {
   const badge = document.getElementById("mode-badge");
   const btnLogin = document.getElementById("btn-admin-login");
@@ -879,6 +894,7 @@ function updateAuthUI() {
     }
     renderCollabUI();
   }
+  renderPublicResponsibles();
   syncMobileTabSelect();
 }
 
@@ -3473,6 +3489,22 @@ function buildLabelsApiPayload() {
   return { pages };
 }
 
+function syncLabelsPaperScale() {
+  const wrap = document.getElementById("labels-paper-wrap");
+  if (!wrap) return;
+  const stage = wrap.querySelector(".labels-paper-stage");
+  const paper = wrap.querySelector(".labels-a4-paper");
+  if (!stage || !paper) return;
+  const cs = typeof getComputedStyle === "function" ? getComputedStyle(wrap) : null;
+  const padX = cs ? (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0) : 20;
+  const avail = wrap.clientWidth - padX;
+  if (avail <= 0) return;
+  const scale = Math.min(1, Math.max(0.35, avail / 630));
+  stage.style.width = `${Math.round(630 * scale)}px`;
+  stage.style.height = `${Math.round(891 * scale)}px`;
+  paper.style.transform = scale < 0.999 ? `scale(${scale.toFixed(4)})` : "";
+}
+
 async function renderLabels() {
   const el = document.getElementById("tab-etiquetas");
   const [pcResp, monResp] = await Promise.all([
@@ -3662,31 +3694,33 @@ async function renderLabels() {
             Layout idêntico ao papel Pimaco 3×6 (<strong>210 × 297 mm</strong>, adesivos <strong>66,0 × 46,51 mm</strong>). Clique em qualquer espaço vazio para inserir a etiqueta configurada, ou clique em uma preenchida para selecionar/editar/remover.
           </div>
 
-          <div class="labels-paper-wrap">
-            <div class="labels-a4-paper" role="grid" aria-label="Grade A4 de 18 etiquetas">
-              <div class="labels-grid">
-                ${activeSheet.map((cell, idx) => {
-                  const r = Math.floor(idx / 3) + 1;
-                  const c = (idx % 3) + 1;
-                  const isSel = idx === ls.selectedSlot;
-                  if (!cell) {
-                    return `
-                      <div class="label-slot is-empty${isSel ? " is-selected" : ""}" data-slot="${idx}" role="gridcell" tabindex="0" title="Espaço L${r}·C${c} (#${idx + 1}) — clique para colocar">
-                        <div class="label-empty-hint">
-                          <span class="label-empty-pos">L${r}·C${c} (#${idx + 1})</span>
-                          <span>+ Colocar aqui</span>
+          <div class="labels-paper-wrap" id="labels-paper-wrap">
+            <div class="labels-paper-stage">
+              <div class="labels-a4-paper" role="grid" aria-label="Grade A4 de 18 etiquetas">
+                <div class="labels-grid">
+                  ${activeSheet.map((cell, idx) => {
+                    const r = Math.floor(idx / 3) + 1;
+                    const c = (idx % 3) + 1;
+                    const isSel = idx === ls.selectedSlot;
+                    if (!cell) {
+                      return `
+                        <div class="label-slot is-empty${isSel ? " is-selected" : ""}" data-slot="${idx}" role="gridcell" tabindex="0" title="Espaço L${r}·C${c} (#${idx + 1}) — clique para colocar">
+                          <div class="label-empty-hint">
+                            <span class="label-empty-pos">L${r}·C${c} (#${idx + 1})</span>
+                            <span>+ Colocar aqui</span>
+                          </div>
                         </div>
+                      `;
+                    }
+                    return `
+                      <div class="label-slot is-filled${isSel ? " is-selected" : ""}" data-slot="${idx}" role="gridcell" tabindex="0" title="${esc(cell.code)} em L${r}·C${c}">
+                        ${renderLabelCardPreviewHtml(cell)}
+                        <span class="label-slot-badge">L${r}·C${c}</span>
+                        <button class="label-slot-clear js-lbl-clear-slot" data-slot="${idx}" type="button" title="Remover esta etiqueta">&times;</button>
                       </div>
                     `;
-                  }
-                  return `
-                    <div class="label-slot is-filled${isSel ? " is-selected" : ""}" data-slot="${idx}" role="gridcell" tabindex="0" title="${esc(cell.code)} em L${r}·C${c}">
-                      ${renderLabelCardPreviewHtml(cell)}
-                      <span class="label-slot-badge">L${r}·C${c}</span>
-                      <button class="label-slot-clear js-lbl-clear-slot" data-slot="${idx}" type="button" title="Remover esta etiqueta">&times;</button>
-                    </div>
-                  `;
-                }).join("")}
+                  }).join("")}
+                </div>
               </div>
             </div>
           </div>
@@ -3912,6 +3946,10 @@ async function renderLabels() {
 
   document.getElementById("btn-lbl-pdf").addEventListener("click", () => exportLabels("pdf"));
   document.getElementById("btn-lbl-docx").addEventListener("click", () => exportLabels("docx"));
+  syncLabelsPaperScale();
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(syncLabelsPaperScale);
+  }
 }
 
 /* ==================== REDE (ADMIN) ==================== */
@@ -5045,6 +5083,14 @@ function openRespondDismissalModal(d) {
         stopCollabPolling();
         state.isAdmin = false;
         state.currentUser = null;
+        try {
+          const stAuth = await apiFetch("/api/auth/status");
+          if (Array.isArray(stAuth?.responsibles)) {
+            state.publicResponsibles = stAuth.responsibles;
+          }
+        } catch {
+          // mantém lista atual
+        }
         updateAuthUI();
         showToast("Demissão aceita. Sua sessão administrativa foi encerrada.");
         loadActiveTab();
@@ -5095,6 +5141,7 @@ async function renderParamsAndAudit() {
   const admins = uData.items || [];
   const dismissals = uData.dismissals || [];
   const activeAdminCount = admins.filter((x) => x.is_active).length;
+  state.publicResponsibles = admins.filter((x) => x.is_active).map((x) => x.nome);
 
   const paramMap = Object.fromEntries((pData.params || []).map((pm) => [pm.key, pm]));
   const weightDefs = [
@@ -5741,6 +5788,7 @@ async function init() {
   }
   window.addEventListener("resize", () => {
     document.querySelectorAll("main.container .table-wrap").forEach(syncTableWrapOverflow);
+    syncLabelsPaperScale();
   });
   document.addEventListener("click", (e) => {
     const sortBtn = e.target.closest(".sort-btn");
@@ -5775,10 +5823,13 @@ async function init() {
     }
   });
   document.getElementById("btn-admin-logout").addEventListener("click", async () => {
-    await apiFetch("/api/auth/logout", { method: "POST" });
+    const out = await apiFetch("/api/auth/logout", { method: "POST" });
     stopCollabPolling();
     state.isAdmin = false;
     state.currentUser = null;
+    if (Array.isArray(out?.responsibles)) {
+      state.publicResponsibles = out.responsibles;
+    }
     updateAuthUI();
     showToast("Sessão administrativa encerrada.");
     loadActiveTab();
@@ -5790,6 +5841,7 @@ async function init() {
     state.needsBootstrap = Boolean(auth.needs_bootstrap);
     state.currentUser = auth.user || null;
     state.collab.pending_dismissals = Array.isArray(auth.pending_dismissals) ? auth.pending_dismissals : [];
+    state.publicResponsibles = Array.isArray(auth.responsibles) ? auth.responsibles : [];
   } catch {
     state.isAdmin = false;
     state.currentUser = null;

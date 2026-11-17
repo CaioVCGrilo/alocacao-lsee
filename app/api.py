@@ -94,6 +94,13 @@ def _needs_admin_bootstrap(conn: Any) -> bool:
     return (int(row["cnt"] or 0) if row is not None else 0) == 0
 
 
+def _get_public_responsibles(conn: Any) -> list[str]:
+    rows = conn.execute(
+        "SELECT nome FROM admin_users WHERE is_active = 1 ORDER BY nome ASC, id ASC"
+    ).fetchall()
+    return [str(r["nome"]).strip() for r in rows if (r["nome"] or "").strip()]
+
+
 def _resolve_session_claims(conn: Any, claims: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not claims:
         return None
@@ -1895,6 +1902,7 @@ class LSEEController:
             if path == "/api/auth/status":
                 claims = self._extract_raw_claims()
                 with db_session() as conn:
+                    _expire_overdue_dismissals(conn)
                     needs_bootstrap = _needs_admin_bootstrap(conn)
                     resolved = _resolve_session_claims(conn, claims)
                     if resolved:
@@ -1902,6 +1910,7 @@ class LSEEController:
                         pending_dismissals = _get_pending_dismissals_for_user(conn, resolved["uid"])
                     else:
                         pending_dismissals = []
+                    responsibles = _get_public_responsibles(conn)
                 user_out = (
                     {
                         "id": resolved["uid"],
@@ -1918,6 +1927,7 @@ class LSEEController:
                         "needs_bootstrap": needs_bootstrap,
                         "user": user_out,
                         "pending_dismissals": pending_dismissals,
+                        "responsibles": responsibles,
                     }
                 )
                 return self._response  # type: ignore[return-value]
@@ -1992,7 +2002,8 @@ class LSEEController:
                 claims = self._extract_raw_claims()
                 with db_session() as conn:
                     _perform_admin_logout(conn, claims)
-                self._send_json({"is_admin": False}, clear_cookie=True)
+                    responsibles = _get_public_responsibles(conn)
+                self._send_json({"is_admin": False, "responsibles": responsibles}, clear_cookie=True)
                 return self._response  # type: ignore[return-value]
 
             if path.startswith("/api/admin/"):
