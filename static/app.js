@@ -800,6 +800,22 @@ function stopCollabPolling() {
   renderCollabUI();
 }
 
+function isMobileChatViewport() {
+  if (typeof window === "undefined") return false;
+  if (typeof window.matchMedia === "function") {
+    return window.matchMedia("(max-width: 720px)").matches;
+  }
+  return Number(window.innerWidth || 0) <= 720;
+}
+
+function maybeCloseMobileChatOnOutsideTap(target) {
+  if (!state.isAdmin || !state.collab.chatOpen || !isMobileChatViewport()) return;
+  if (target && typeof target.closest === "function") {
+    if (target.closest("#admin-chat-widget, #admin-presence-pill")) return;
+  }
+  toggleAdminChat(false);
+}
+
 function toggleAdminChat(forceOpen = null) {
   if (!state.isAdmin) return;
   const next = forceOpen === null ? !state.collab.chatOpen : Boolean(forceOpen);
@@ -5790,7 +5806,29 @@ async function init() {
     document.querySelectorAll("main.container .table-wrap").forEach(syncTableWrapOverflow);
     syncLabelsPaperScale();
   });
+  let mobileChatTapOrigin = null;
+  document.addEventListener("pointerdown", (e) => {
+    if (!state.isAdmin || !state.collab.chatOpen || !isMobileChatViewport()) {
+      mobileChatTapOrigin = null;
+      return;
+    }
+    if (e.target && typeof e.target.closest === "function" && e.target.closest("#admin-chat-widget, #admin-presence-pill")) {
+      mobileChatTapOrigin = null;
+      return;
+    }
+    mobileChatTapOrigin = { x: Number(e.clientX || 0), y: Number(e.clientY || 0) };
+  });
+  document.addEventListener("pointerup", (e) => {
+    if (!mobileChatTapOrigin) return;
+    const dx = Math.abs(Number(e.clientX || 0) - mobileChatTapOrigin.x);
+    const dy = Math.abs(Number(e.clientY || 0) - mobileChatTapOrigin.y);
+    mobileChatTapOrigin = null;
+    if (dx < 12 && dy < 12) {
+      maybeCloseMobileChatOnOutsideTap(e.target);
+    }
+  });
   document.addEventListener("click", (e) => {
+    maybeCloseMobileChatOnOutsideTap(e.target);
     const sortBtn = e.target.closest(".sort-btn");
     if (sortBtn) {
       const { sortTable, sortCol } = sortBtn.dataset;
