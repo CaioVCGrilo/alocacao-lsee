@@ -37,6 +37,10 @@
         <button id="btn-admin-logout" class="btn btn-secondary hidden" type="button">Sair do Admin</button>
       </div>
     </div>
+    <div class="mobile-nav-wrap">
+      <label class="mobile-nav-label" for="mobile-tab-select">Seção</label>
+      <select id="mobile-tab-select" class="select mobile-tab-select" aria-label="Selecionar seção"></select>
+    </div>
     <nav class="tabs" id="main-tabs">
       <button class="tab active" data-tab="dashboard" type="button">Dashboard</button>
       <button class="tab" data-tab="computadores" type="button">Computadores</button>
@@ -54,7 +58,7 @@
   </header>
 
   <main class="container">
-    <div id="collab-warning-banner" class="collab-warning-banner hidden"></div>
+    <div id="pending-dismissal-banner" class="dismissal-banner hidden"></div>
     <div id="toast-area" class="toast-area" aria-live="polite"></div>
 
     <!-- TAB: DASHBOARD -->

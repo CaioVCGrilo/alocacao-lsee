@@ -134,6 +134,10 @@ a:hover {
   flex-wrap: wrap;
 }
 
+.mobile-nav-wrap {
+  display: none;
+}
+
 .tabs {
   max-width: 1340px;
   margin: 0 auto;
@@ -1110,18 +1114,6 @@ tbody tr:hover {
   }
 }
 
-@media (max-width: 720px) {
-  .grid-2 {
-    grid-template-columns: 1fr;
-  }
-  .brand-divider {
-    display: none;
-  }
-  .brand-logo {
-    height: 36px;
-  }
-}
-
 .th-sort-wrap {
   display: inline-flex;
   align-items: center;
@@ -1769,7 +1761,7 @@ tbody tr:hover {
   font-size: 0.78rem;
   font-weight: 600;
   cursor: pointer;
-  border: 1px solid var(--border);
+  border: 1px solid #a7f3d0;
   background: var(--success-bg);
   color: var(--success);
   transition: transform 0.12s ease, box-shadow 0.12s ease;
@@ -1778,12 +1770,6 @@ tbody tr:hover {
 .presence-pill:hover {
   transform: translateY(-1px);
   box-shadow: 0 2px 8px rgba(8, 36, 54, 0.12);
-}
-
-.presence-pill.has-others {
-  background: var(--warning-bg);
-  border-color: #f59e0b;
-  color: #92400e;
 }
 
 .presence-dot {
@@ -1795,16 +1781,12 @@ tbody tr:hover {
   flex-shrink: 0;
 }
 
-.presence-pill.has-others .presence-dot {
-  background: #d97706;
-}
-
-.collab-warning-banner {
-  background: var(--warning-bg);
-  border: 1px solid #f59e0b;
-  color: #78350f;
+.dismissal-banner {
+  background: var(--surface);
+  border: 1px solid #fda4af;
+  border-left: 4px solid var(--danger);
   border-radius: 10px;
-  padding: 10px 14px;
+  padding: 12px 14px;
   margin-bottom: 16px;
   display: flex;
   flex-wrap: wrap;
@@ -1812,6 +1794,7 @@ tbody tr:hover {
   align-items: center;
   gap: 10px;
   font-size: 0.86rem;
+  box-shadow: 0 2px 8px rgba(8, 36, 54, 0.06);
 }
 
 .admin-chat-widget {
@@ -1973,6 +1956,163 @@ tbody tr:hover {
   margin-bottom: 12px;
 }
 
+@media (max-width: 720px) {
+  .topbar {
+    position: static;
+  }
+
+  .topbar-inner {
+    padding: 10px 14px;
+    gap: 10px;
+  }
+
+  .brand {
+    gap: 10px;
+  }
+
+  .brand-divider,
+  .subtitle {
+    display: none;
+  }
+
+  .brand-logo {
+    height: 34px;
+  }
+
+  .brand-text h1 {
+    font-size: 0.96rem;
+  }
+
+  .topbar-actions {
+    width: 100%;
+    gap: 6px;
+  }
+
+  .topbar-actions .btn {
+    padding: 7px 10px;
+    font-size: 0.8rem;
+  }
+
+  .presence-pill {
+    max-width: 100%;
+    white-space: normal;
+    text-align: left;
+  }
+
+  #btn-admin-help span {
+    display: none;
+  }
+
+  .tabs {
+    display: none;
+  }
+
+  .mobile-nav-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px 10px;
+    border-top: 1px solid #edf4f9;
+    background: var(--surface-alt);
+  }
+
+  .mobile-nav-label {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--brand-deep);
+    white-space: nowrap;
+  }
+
+  .mobile-tab-select {
+    flex: 1;
+    min-width: 0;
+    font-weight: 600;
+  }
+
+  .container {
+    padding: 14px 12px 32px;
+  }
+
+  .card {
+    padding: 14px;
+  }
+
+  .card-header {
+    gap: 8px;
+  }
+
+  .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .kpi {
+    padding: 12px;
+  }
+
+  .kpi-value {
+    font-size: 1.38rem;
+  }
+
+  .grid-2,
+  .help-grid,
+  .form-grid,
+  .map-kv-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .toolbar,
+  .map-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .toolbar .input,
+  .toolbar .select,
+  .map-toolbar .select,
+  .map-toolbar-group {
+    width: 100%;
+  }
+
+  .table-scroll-top {
+    display: none !important;
+  }
+
+  .table-wrap.is-overflowing .table-sticky-actions th:last-child,
+  .table-wrap.is-overflowing .table-sticky-actions td:last-child:not([colspan]) {
+    position: static;
+    box-shadow: none;
+    background: inherit;
+  }
+
+  .modal {
+    padding: 16px;
+  }
+
+  .admin-chat-widget {
+    right: 10px;
+    bottom: 10px;
+  }
+
+  .admin-chat-panel {
+    width: calc(100vw - 20px);
+    max-width: none;
+    height: min(390px, 68vh);
+  }
+
+  .admin-chat-toggle {
+    padding: 9px 13px;
+    font-size: 0.82rem;
+  }
+
+  .toast-area {
+    left: 10px;
+    right: 10px;
+    bottom: 60px;
+    max-width: none;
+  }
+}
+
 @media print {
   @page {
     size: A4 portrait;
@@ -1998,7 +2138,7 @@ tbody tr:hover {
   body.printing-map #map-swap-banner-slot,
   body.printing-map .banner-info,
   body.printing-map #admin-chat-widget,
-  body.printing-map #collab-warning-banner {
+  body.printing-map #pending-dismissal-banner {
     display: none !important;
   }
 

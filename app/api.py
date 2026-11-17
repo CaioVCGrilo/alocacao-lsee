@@ -188,6 +188,7 @@ def _perform_admin_login(conn: Any, body: Dict[str, Any]) -> Tuple[int, Dict[str
     token = create_session_token(
         {"uid": int(user["id"]), "nusp": user["numero_usp"], "nome": user["nome"], "sid": sid}
     )
+    pending_dismissals = _get_pending_dismissals_for_user(conn, int(user["id"]))
     return (
         HTTPStatus.OK,
         {
@@ -199,6 +200,7 @@ def _perform_admin_login(conn: Any, body: Dict[str, Any]) -> Tuple[int, Dict[str
                 "nome": user["nome"],
                 "session_id": sid,
             },
+            "pending_dismissals": pending_dismissals,
         },
         token,
     )
@@ -282,10 +284,58 @@ def _get_collab_payload(conn: Any, admin_info: Dict[str, Any]) -> Dict[str, Any]
         "other_online_count": other_online_count,
         "messages": messages,
         "latest_message_id": int(messages[-1]["id"]) if messages else 0,
+        "pending_dismissals": _get_pending_dismissals_for_user(conn, my_uid) if my_uid > 0 else [],
     }
 
 
+def _expire_overdue_dismissals(conn: Any) -> None:
+    now = _now_iso()
+    conn.execute(
+        """
+        UPDATE admin_dismissal_requests
+        SET status = 'expired', responded_at = ?
+        WHERE status = 'pending' AND expires_at < ?
+        """,
+        (now, now),
+    )
+
+
+def _format_dismissal_row(r: Any) -> Dict[str, Any]:
+    return {
+        "id": int(r["id"]),
+        "target_user_id": int(r["target_user_id"]),
+        "target_numero_usp": r["target_numero_usp"] or "",
+        "target_nome": r["target_nome"] or "",
+        "requested_by_user_id": int(r["requested_by_user_id"] or 0),
+        "requested_by_nome": r["requested_by_nome"] or "",
+        "reason": r["reason"] or "",
+        "status": r["status"] or "pending",
+        "created_at": r["created_at"] or "",
+        "expires_at": r["expires_at"] or "",
+        "responded_at": r["responded_at"] or "",
+    }
+
+
+def _get_pending_dismissals_for_user(conn: Any, user_id: int) -> list[Dict[str, Any]]:
+    if user_id <= 0:
+        return []
+    _expire_overdue_dismissals(conn)
+    rows = conn.execute(
+        """
+        SELECT id, target_user_id, target_numero_usp, target_nome,
+               requested_by_user_id, requested_by_nome, reason, status,
+               created_at, expires_at, responded_at
+        FROM admin_dismissal_requests
+        WHERE target_user_id = ? AND status = 'pending'
+        ORDER BY id DESC
+        """,
+        (user_id,),
+    ).fetchall()
+    return [_format_dismissal_row(r) for r in rows]
+
+
 def _get_admin_users_payload(conn: Any) -> Dict[str, Any]:
+    _expire_overdue_dismissals(conn)
     rows = conn.execute(
         """
         SELECT id, numero_usp, nome, is_active, created_at, created_by
@@ -293,6 +343,22 @@ def _get_admin_users_payload(conn: Any) -> Dict[str, Any]:
         ORDER BY is_active DESC, nome ASC, id ASC
         """
     ).fetchall()
+    d_rows = conn.execute(
+        """
+        SELECT id, target_user_id, target_numero_usp, target_nome,
+               requested_by_user_id, requested_by_nome, reason, status,
+               created_at, expires_at, responded_at
+        FROM admin_dismissal_requests
+        ORDER BY id DESC
+        LIMIT 50
+        """
+    ).fetchall()
+    dismissals = [_format_dismissal_row(r) for r in d_rows]
+    pending_by_target: Dict[int, Dict[str, Any]] = {}
+    for d in dismissals:
+        tid = d["target_user_id"]
+        if d["status"] == "pending" and tid not in pending_by_target:
+            pending_by_target[tid] = d
     return {
         "items": [
             {
@@ -302,9 +368,11 @@ def _get_admin_users_payload(conn: Any) -> Dict[str, Any]:
                 "is_active": bool(int(r["is_active"] or 0)),
                 "created_at": r["created_at"] or "",
                 "created_by": r["created_by"] or "",
+                "pending_dismissal": pending_by_target.get(int(r["id"])),
             }
             for r in rows
-        ]
+        ],
+        "dismissals": dismissals,
     }
 
 
@@ -356,8 +424,10 @@ def _update_admin_user_record(
     if not row:
         raise LookupError("Administrador não encontrado.")
 
-    editing_profile = "nome" in body or "numero_usp" in body
-    if editing_profile and (current_uid <= 0 or user_id != current_uid):
+    if "is_active" in body:
+        raise PermissionError("Alterações de acesso de administradores devem ser feitas via solicitação de demissão.")
+
+    if current_uid <= 0 or user_id != current_uid:
         raise PermissionError("Apenas o próprio administrador pode editar seu Número USP e nome.")
 
     new_nusp = normalize_nusp(body["numero_usp"]) if "numero_usp" in body else str(row["numero_usp"] or "")
@@ -375,43 +445,22 @@ def _update_admin_user_record(
     if len(nome) < 2:
         raise ValueError("Informe um nome válido para o administrador (mínimo 2 caracteres).")
 
-    active = bool(body.get("is_active")) if "is_active" in body else bool(int(row["is_active"] or 0))
-    if not active and current_uid > 0 and user_id == current_uid:
-        raise ValueError("Você não pode desativar o próprio usuário atualmente conectado.")
-    if not active:
-        other_cnt = conn.execute(
-            "SELECT COUNT(*) AS cnt FROM admin_users WHERE is_active = 1 AND id != ?",
-            (user_id,),
-        ).fetchone()
-        if int((other_cnt["cnt"] if other_cnt else 0) or 0) == 0:
-            raise ValueError("Não é possível desativar o último administrador ativo.")
-        conn.execute(
-            "UPDATE admin_sessions SET logged_out_at = ? WHERE user_id = ? AND (logged_out_at IS NULL OR logged_out_at = '')",
-            (_now_iso(), user_id),
-        )
-
     conn.execute(
-        "UPDATE admin_users SET numero_usp = ?, nome = ?, is_active = ? WHERE id = ?",
-        (new_nusp, nome, 1 if active else 0, user_id),
+        "UPDATE admin_users SET numero_usp = ?, nome = ? WHERE id = ?",
+        (new_nusp, nome, user_id),
     )
-    if editing_profile:
-        conn.execute(
-            "UPDATE admin_sessions SET numero_usp = ?, nome = ? WHERE user_id = ? AND (logged_out_at IS NULL OR logged_out_at = '')",
-            (new_nusp, nome, user_id),
-        )
-    _log_audit(
-        conn,
-        "UPDATE_ADMIN_USER",
-        f"NUSP {new_nusp}",
-        f"{nome} ({'Ativo' if active else 'Inativo'})",
+    conn.execute(
+        "UPDATE admin_sessions SET numero_usp = ?, nome = ? WHERE user_id = ? AND (logged_out_at IS NULL OR logged_out_at = '')",
+        (new_nusp, nome, user_id),
     )
+    _log_audit(conn, "UPDATE_ADMIN_USER", f"NUSP {new_nusp}", nome)
     return {
         "ok": True,
         "item": {
             "id": user_id,
             "numero_usp": new_nusp,
             "nome": nome,
-            "is_active": active,
+            "is_active": bool(int(row["is_active"] or 0)),
             "created_at": row["created_at"] or "",
             "created_by": row["created_by"] or "",
         },
@@ -419,28 +468,143 @@ def _update_admin_user_record(
     }
 
 
-def _delete_admin_user_record(conn: Any, user_id: int, current_uid: int) -> Dict[str, Any]:
-    row = conn.execute(
+def _create_admin_dismissal_record(
+    conn: Any,
+    target_uid: int,
+    body: Dict[str, Any],
+    requester: Dict[str, Any],
+) -> Dict[str, Any]:
+    _expire_overdue_dismissals(conn)
+    req_uid = int(requester.get("uid") or 0)
+    req_nome = str(requester.get("nome") or requester.get("actor_label") or "Administrador")
+    if req_uid > 0 and target_uid == req_uid:
+        raise ValueError("Você não pode solicitar a demissão de si mesmo.")
+
+    target = conn.execute(
         "SELECT id, numero_usp, nome, is_active FROM admin_users WHERE id = ?",
-        (user_id,),
+        (target_uid,),
+    ).fetchone()
+    if not target:
+        raise LookupError("Administrador não encontrado.")
+    if not int(target["is_active"] or 0):
+        raise ValueError("Este administrador já está inativo.")
+
+    reason = " ".join(str(body.get("reason") or "").split())
+    if len(reason) < 5:
+        raise ValueError("Informe o motivo da demissão (mínimo de 5 caracteres).")
+
+    existing_pending = conn.execute(
+        "SELECT id FROM admin_dismissal_requests WHERE target_user_id = ? AND status = 'pending'",
+        (target_uid,),
+    ).fetchone()
+    if existing_pending:
+        raise ValueError("Já existe uma solicitação de demissão pendente para este administrador.")
+
+    created_dt = datetime.now(timezone.utc)
+    created_at = created_dt.isoformat()
+    expires_at = (created_dt + timedelta(days=7)).isoformat()
+    cur = conn.execute(
+        """
+        INSERT INTO admin_dismissal_requests(
+            target_user_id, target_numero_usp, target_nome,
+            requested_by_user_id, requested_by_nome, reason,
+            status, created_at, expires_at, responded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, '')
+        """,
+        (
+            target_uid,
+            target["numero_usp"],
+            target["nome"],
+            req_uid,
+            req_nome,
+            reason,
+            created_at,
+            expires_at,
+        ),
+    )
+    _log_audit(
+        conn,
+        "REQUEST_ADMIN_DISMISSAL",
+        f"NUSP {target['numero_usp']}",
+        f"{target['nome']} — Motivo: {reason}",
+    )
+    row = conn.execute(
+        """
+        SELECT id, target_user_id, target_numero_usp, target_nome,
+               requested_by_user_id, requested_by_nome, reason, status,
+               created_at, expires_at, responded_at
+        FROM admin_dismissal_requests
+        WHERE id = ?
+        """,
+        (int(cur.lastrowid),),
+    ).fetchone()
+    return {"ok": True, "dismissal": _format_dismissal_row(row)}
+
+
+def _respond_admin_dismissal_record(
+    conn: Any,
+    dismissal_id: int,
+    body: Dict[str, Any],
+    current_uid: int,
+) -> Dict[str, Any]:
+    _expire_overdue_dismissals(conn)
+    row = conn.execute(
+        """
+        SELECT id, target_user_id, target_numero_usp, target_nome,
+               requested_by_user_id, requested_by_nome, reason, status,
+               created_at, expires_at, responded_at
+        FROM admin_dismissal_requests
+        WHERE id = ?
+        """,
+        (dismissal_id,),
     ).fetchone()
     if not row:
-        raise LookupError("Administrador não encontrado.")
-    if current_uid > 0 and user_id == current_uid:
-        raise ValueError("Você não pode excluir o próprio usuário atualmente conectado.")
-    other_cnt = conn.execute(
-        "SELECT COUNT(*) AS cnt FROM admin_users WHERE is_active = 1 AND id != ?",
-        (user_id,),
-    ).fetchone()
-    if int((other_cnt["cnt"] if other_cnt else 0) or 0) == 0:
-        raise ValueError("Não é possível excluir o último administrador ativo.")
-    conn.execute("DELETE FROM admin_users WHERE id = ?", (user_id,))
+        raise LookupError("Solicitação de demissão não encontrada.")
+    if current_uid <= 0 or int(row["target_user_id"]) != current_uid:
+        raise PermissionError("Apenas o administrador destinatário pode aceitar ou recusar esta demissão.")
+    if row["status"] != "pending":
+        raise ValueError(f"Esta solicitação já foi encerrada ({row['status']}).")
+
+    decision = str(body.get("decision") or "").strip().lower()
+    if decision not in ("accept", "reject"):
+        raise ValueError("Decisão inválida: informe 'accept' ou 'reject'.")
+
+    now = _now_iso()
+    if decision == "accept":
+        other_cnt = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM admin_users WHERE is_active = 1 AND id != ?",
+            (current_uid,),
+        ).fetchone()
+        if int((other_cnt["cnt"] if other_cnt else 0) or 0) == 0:
+            raise ValueError("Não há outro administrador ativo para manter o acesso ao sistema.")
+        conn.execute(
+            "UPDATE admin_dismissal_requests SET status = 'accepted', responded_at = ? WHERE id = ?",
+            (now, dismissal_id),
+        )
+        conn.execute("UPDATE admin_users SET is_active = 0 WHERE id = ?", (current_uid,))
+        conn.execute(
+            "UPDATE admin_sessions SET logged_out_at = ? WHERE user_id = ? AND (logged_out_at IS NULL OR logged_out_at = '')",
+            (now, current_uid),
+        )
+        _log_audit(
+            conn,
+            "ACCEPT_ADMIN_DISMISSAL",
+            f"NUSP {row['target_numero_usp']}",
+            f"Aceita por {row['target_nome']} — Motivo: {row['reason']}",
+        )
+        return {"ok": True, "status": "accepted", "logged_out": True}
+
     conn.execute(
-        "UPDATE admin_sessions SET logged_out_at = ? WHERE user_id = ? AND (logged_out_at IS NULL OR logged_out_at = '')",
-        (_now_iso(), user_id),
+        "UPDATE admin_dismissal_requests SET status = 'rejected', responded_at = ? WHERE id = ?",
+        (now, dismissal_id),
     )
-    _log_audit(conn, "DELETE_ADMIN_USER", f"NUSP {row['numero_usp']}", f"Removido ({row['nome']})")
-    return {"ok": True}
+    _log_audit(
+        conn,
+        "REJECT_ADMIN_DISMISSAL",
+        f"NUSP {row['target_numero_usp']}",
+        f"Recusada por {row['target_nome']}",
+    )
+    return {"ok": True, "status": "rejected", "logged_out": False}
 
 
 def _to_opt_float(val: Any) -> Optional[float]:
@@ -1327,6 +1491,9 @@ class LSEEController:
                     resolved = _resolve_session_claims(conn, claims)
                     if resolved:
                         _touch_admin_session(conn, resolved)
+                        pending_dismissals = _get_pending_dismissals_for_user(conn, resolved["uid"])
+                    else:
+                        pending_dismissals = []
                 user_out = (
                     {
                         "id": resolved["uid"],
@@ -1342,6 +1509,7 @@ class LSEEController:
                         "is_admin": resolved is not None,
                         "needs_bootstrap": needs_bootstrap,
                         "user": user_out,
+                        "pending_dismissals": pending_dismissals,
                     }
                 )
                 return self._response  # type: ignore[return-value]
@@ -2210,6 +2378,24 @@ class LSEEController:
                 self._send_json(res, status=HTTPStatus.CREATED)
                 return
 
+            if path.startswith("/api/admin/users/") and path.endswith("/dismiss"):
+                target_uid = int(path.split("/")[4])
+                res = _create_admin_dismissal_record(
+                    conn,
+                    target_uid,
+                    body,
+                    getattr(self, "_admin_user", None) or {},
+                )
+                self._send_json(res, status=HTTPStatus.CREATED)
+                return
+
+            if path.startswith("/api/admin/dismissals/") and path.endswith("/respond"):
+                dismissal_id = int(path.split("/")[4])
+                current_uid = int((getattr(self, "_admin_user", None) or {}).get("uid") or 0)
+                res = _respond_admin_dismissal_record(conn, dismissal_id, body, current_uid)
+                self._send_json(res, clear_cookie=bool(res.get("logged_out")))
+                return
+
             if path == "/api/admin/requests":
                 payload = body
                 if body.get("reset_item_dates") and isinstance(body.get("items"), list):
@@ -2495,11 +2681,9 @@ class LSEEController:
     def _route_admin_delete(self, path: str) -> None:
         with db_session() as conn:
             if path.startswith("/api/admin/users/"):
-                user_pk = int(path.split("/")[4])
-                current_uid = int((getattr(self, "_admin_user", None) or {}).get("uid") or 0)
-                res = _delete_admin_user_record(conn, user_pk, current_uid)
-                self._send_json(res)
-                return
+                raise PermissionError(
+                    "A exclusão unilateral foi substituída pela solicitação de demissão com prazo de 7 dias."
+                )
             if path.startswith("/api/admin/monitors/"):
                 m_pk = int(path.split("/")[4])
                 conn.execute("DELETE FROM monitors WHERE id = ?", (m_pk,))

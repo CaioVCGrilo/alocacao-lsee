@@ -315,6 +315,22 @@ SCHEMA_STATEMENTS = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
     """
+    CREATE TABLE IF NOT EXISTS admin_dismissal_requests (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        target_user_id INT NOT NULL,
+        target_numero_usp VARCHAR(32) NOT NULL,
+        target_nome VARCHAR(255) NOT NULL,
+        requested_by_user_id INT NOT NULL,
+        requested_by_nome VARCHAR(255) NOT NULL,
+        reason TEXT NOT NULL,
+        status VARCHAR(32) NOT NULL DEFAULT 'pending',
+        created_at VARCHAR(100) NOT NULL,
+        expires_at VARCHAR(100) NOT NULL,
+        responded_at VARCHAR(100) DEFAULT '',
+        INDEX idx_admin_dismissal_target (target_user_id, status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
     CREATE TABLE IF NOT EXISTS audit_log (
         id INT AUTO_INCREMENT PRIMARY KEY,
         timestamp VARCHAR(100) NOT NULL,

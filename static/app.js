@@ -60,6 +60,8 @@ const state = {
     chatOpen: false,
     timer: null,
     pollingBusy: false,
+    pending_dismissals: [],
+    shownDismissalIds: [],
   },
   simPc: "",
   compFilters: { search: "", status: "", tipo: "", pendencia: "" },
@@ -546,9 +548,42 @@ function fmtTimeLocalShort(iso) {
   }
 }
 
+function fmtDateTimeLocalShort(iso) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso).slice(0, 16);
+    return d.toLocaleString("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return String(iso).slice(0, 16);
+  }
+}
+
+function fmtDateLocalBr(iso) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso).slice(0, 10);
+    return d.toLocaleDateString("pt-BR");
+  } catch {
+    return String(iso).slice(0, 10);
+  }
+}
+
+function applyAuthDismissals(list) {
+  state.collab.pending_dismissals = Array.isArray(list) ? list : [];
+  renderCollabUI();
+}
+
 function renderCollabUI() {
   const pill = document.getElementById("admin-presence-pill");
-  const banner = document.getElementById("collab-warning-banner");
+  const dismissalBanner = document.getElementById("pending-dismissal-banner");
   const widget = document.getElementById("admin-chat-widget");
   const panel = document.getElementById("admin-chat-panel");
   const onlineCountEl = document.getElementById("admin-chat-online-count");
@@ -559,7 +594,8 @@ function renderCollabUI() {
 
   if (!state.isAdmin) {
     pill?.classList.add("hidden");
-    banner?.classList.add("hidden");
+    dismissalBanner?.classList.add("hidden");
+    if (dismissalBanner) dismissalBanner.innerHTML = "";
     widget?.classList.add("hidden");
     panel?.classList.add("hidden");
     return;
@@ -573,29 +609,41 @@ function renderCollabUI() {
 
   if (pill) {
     pill.classList.remove("hidden");
-    pill.classList.toggle("has-others", others.length > 0);
     if (others.length > 0) {
-      const names = others.map((a) => `${a.nome} (${ADMIN_TAB_LABELS[a.active_tab] || a.active_tab})`).join(", ");
-      pill.innerHTML = `<span class="presence-dot"></span><span>⚠ Outro ADM online: ${esc(names)}</span>`;
+      const names = others
+        .map((a) => `${a.nome} · ${ADMIN_TAB_LABELS[a.active_tab] || a.active_tab || "Dashboard"}`)
+        .join(" | ");
+      pill.innerHTML = `<span class="presence-dot"></span><span>${esc(names)}</span>`;
     } else {
-      pill.innerHTML = `<span class="presence-dot"></span><span>Somente você conectado</span>`;
+      pill.innerHTML = `<span class="presence-dot"></span><span>Online</span>`;
     }
   }
 
-  if (banner) {
-    if (others.length > 0) {
-      const summary = others
-        .map((a) => `<strong>${esc(a.nome)}</strong>${a.numero_usp ? ` (NUSP ${esc(a.numero_usp)})` : ""} na aba <strong>${esc(ADMIN_TAB_LABELS[a.active_tab] || a.active_tab)}</strong>`)
-        .join("; ");
-      banner.classList.remove("hidden");
-      banner.innerHTML = `
-        <span>⚠ Atenção — outro administrador está ativo no momento: ${summary}. Combine pelo chat à direita antes de salvar alterações.</span>
-        <button class="btn btn-sm btn-secondary js-open-collab-chat" type="button">Abrir chat</button>
+  const pendingDismissals = state.collab.pending_dismissals || [];
+  if (dismissalBanner) {
+    if (pendingDismissals.length > 0) {
+      const firstD = pendingDismissals[0];
+      dismissalBanner.classList.remove("hidden");
+      dismissalBanner.innerHTML = `
+        <div>
+          <strong>Solicitação de demissão pendente</strong> enviada por <strong>${esc(firstD.requested_by_nome || "Administrador")}</strong>
+          (prazo até ${esc(fmtDateTimeLocalShort(firstD.expires_at))}).
+        </div>
+        <button class="btn btn-sm btn-danger js-respond-dismissal" type="button">Visualizar e responder</button>
       `;
-      banner.querySelector(".js-open-collab-chat")?.addEventListener("click", () => toggleAdminChat(true));
+      dismissalBanner.querySelector(".js-respond-dismissal")?.addEventListener("click", () => {
+        openRespondDismissalModal(firstD);
+      });
+      const modalBackdrop = document.getElementById("modal-backdrop");
+      const isModalOpen = Boolean(modalBackdrop && !modalBackdrop.classList.contains("hidden"));
+      const dId = Number(firstD.id);
+      if (!isModalOpen && !state.collab.shownDismissalIds.includes(dId)) {
+        state.collab.shownDismissalIds.push(dId);
+        openRespondDismissalModal(firstD);
+      }
     } else {
-      banner.classList.add("hidden");
-      banner.innerHTML = "";
+      dismissalBanner.classList.add("hidden");
+      dismissalBanner.innerHTML = "";
     }
   }
 
@@ -660,6 +708,9 @@ function applyCollabData(data) {
   col.other_online_count = Number(data.other_online_count || 0);
   col.messages = msgs;
   col.latest_message_id = latestId;
+  if (Array.isArray(data.pending_dismissals)) {
+    col.pending_dismissals = data.pending_dismissals;
+  }
   renderCollabUI();
 }
 
@@ -720,6 +771,8 @@ function stopCollabPolling() {
   state.collab.initialized = false;
   state.collab.unread = 0;
   state.collab.chatOpen = false;
+  state.collab.pending_dismissals = [];
+  state.collab.shownDismissalIds = [];
   renderCollabUI();
 }
 
@@ -751,6 +804,20 @@ async function sendAdminChatMessage(rawText) {
   state.collab.lastSeenMessageId = state.collab.latest_message_id;
   const msgsEl = document.getElementById("admin-chat-messages");
   if (msgsEl) msgsEl.scrollTop = msgsEl.scrollHeight;
+}
+
+function syncMobileTabSelect() {
+  const sel = document.getElementById("mobile-tab-select");
+  if (!sel) return;
+  const visibleTabs = Array.from(document.querySelectorAll("#main-tabs .tab")).filter(
+    (btn) => !btn.classList.contains("hidden")
+  );
+  sel.innerHTML = visibleTabs
+    .map((btn) => `<option value="${esc(btn.dataset.tab)}">${esc(btn.textContent.trim())}</option>`)
+    .join("");
+  if (visibleTabs.some((btn) => btn.dataset.tab === state.activeTab)) {
+    sel.value = state.activeTab;
+  }
 }
 
 function updateAuthUI() {
@@ -789,6 +856,7 @@ function updateAuthUI() {
     }
     renderCollabUI();
   }
+  syncMobileTabSelect();
 }
 
 function switchTab(tabName) {
@@ -798,6 +866,7 @@ function switchTab(tabName) {
   document.querySelectorAll(".tab").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.tab === tabName);
   });
+  syncMobileTabSelect();
   document.querySelectorAll(".tab-panel").forEach((panel) => {
     panel.classList.toggle("active", panel.id === `tab-${tabName}`);
   });
@@ -4845,6 +4914,97 @@ function openEditSelfAdminModal(user, onSaved) {
   });
 }
 
+function openDismissAdminModal(user, onSaved) {
+  openModal(`Demitir Administrador — ${user.nome}`, `
+    <p class="muted" style="margin-top:0;font-size:0.84rem;">
+      A solicitação com o motivo será enviada para <strong>${esc(user.nome)}</strong> (NUSP <span class="mono">${esc(user.numero_usp)}</span>), que terá <strong>7 dias</strong> para aceitar ou recusar a demissão.
+    </p>
+    <form id="form-dismiss-adm">
+      <div class="form-field">
+        <label for="dismiss-reason">Motivo da demissão</label>
+        <textarea id="dismiss-reason" class="input" name="reason" rows="3" minlength="5" required placeholder="Descreva o motivo desta solicitação de demissão..."></textarea>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-secondary" type="button" onclick="closeModal()">Cancelar</button>
+        <button class="btn btn-danger" type="submit">Enviar solicitação de demissão</button>
+      </div>
+    </form>
+  `);
+  setTimeout(() => document.getElementById("dismiss-reason")?.focus(), 40);
+  document.getElementById("form-dismiss-adm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const payload = Object.fromEntries(new FormData(e.target).entries());
+    try {
+      await apiFetch(`/api/admin/users/${user.id}/dismiss`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      closeModal();
+      pollCollab(true);
+      showToast("Solicitação de demissão enviada (prazo de 7 dias).");
+      if (onSaved) onSaved();
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  });
+}
+
+function openRespondDismissalModal(d) {
+  openModal("Solicitação de Demissão Recebida", `
+    <p class="muted" style="margin-top:0;font-size:0.86rem;">
+      <strong>${esc(d.requested_by_nome || "Administrador")}</strong> enviou uma solicitação para encerrar o seu acesso administrativo.
+      Você tem até <strong>${esc(fmtDateTimeLocalShort(d.expires_at))}</strong> (7 dias) para responder.
+    </p>
+    <div style="background:var(--surface-alt);border:1px solid var(--border);border-radius:8px;padding:12px;margin:12px 0;">
+      <div style="font-size:0.78rem;color:var(--muted);margin-bottom:4px;">Motivo informado:</div>
+      <div style="white-space:pre-wrap;font-size:0.9rem;">${esc(d.reason)}</div>
+    </div>
+    <p class="muted" style="font-size:0.8rem;margin-bottom:14px;">
+      <strong>Aceitar demissão</strong> desativa seu acesso administrativo e encerra sua sessão imediatamente. <strong>Recusar demissão</strong> mantém seu acesso ativo.
+    </p>
+    <div class="form-actions">
+      <button class="btn btn-secondary" id="btn-dismissal-reject" type="button">Recusar demissão</button>
+      <button class="btn btn-danger" id="btn-dismissal-accept" type="button">Aceitar demissão</button>
+    </div>
+  `);
+  const handleDecision = async (decision) => {
+    try {
+      const res = await apiFetch(`/api/admin/dismissals/${d.id}/respond`, {
+        method: "POST",
+        body: JSON.stringify({ decision }),
+      });
+      closeModal();
+      if (res?.logged_out) {
+        stopCollabPolling();
+        state.isAdmin = false;
+        state.currentUser = null;
+        updateAuthUI();
+        showToast("Demissão aceita. Sua sessão administrativa foi encerrada.");
+        loadActiveTab();
+      } else {
+        state.collab.pending_dismissals = (state.collab.pending_dismissals || []).filter(
+          (x) => Number(x.id) !== Number(d.id)
+        );
+        renderCollabUI();
+        pollCollab(true);
+        showToast("Demissão recusada. Seu acesso foi mantido.");
+        if (state.activeTab === "parametros") renderParamsAndAudit();
+      }
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  };
+  document.getElementById("btn-dismissal-reject")?.addEventListener("click", () => handleDecision("reject"));
+  document.getElementById("btn-dismissal-accept")?.addEventListener("click", () => handleDecision("accept"));
+}
+
+const DISMISSAL_STATUS_META = {
+  pending: { label: "Pendente", cls: "badge-warn" },
+  accepted: { label: "Aceita", cls: "badge-danger" },
+  rejected: { label: "Recusada", cls: "badge-livre" },
+  expired: { label: "Expirada (7d)", cls: "badge-muted" },
+};
+
 /* ==================== PARÂMETROS & LOG (ADMIN) ==================== */
 async function renderParamsAndAudit() {
   const el = document.getElementById("tab-parametros");
@@ -4854,13 +5014,14 @@ async function renderParamsAndAudit() {
     apiFetch("/api/admin/users"),
   ]);
   const admins = uData.items || [];
+  const dismissals = uData.dismissals || [];
 
   el.innerHTML = `
     <div class="card">
       <div class="card-header"><h2 class="card-title">Administradores Autorizados (Login por Número USP)</h2></div>
       <div class="card-body">
         <p class="muted" style="margin-top:0;font-size:0.84rem;">
-          Todos os administradores usam a mesma senha administrativa, porém o login só é liberado para os <strong>Números USP</strong> cadastrados e ativos abaixo. Apenas o próprio administrador pode editar seu Número USP e nome.
+          Todos os administradores usam a mesma senha administrativa, porém o login só é liberado para os <strong>Números USP</strong> cadastrados e ativos abaixo. Apenas o próprio administrador pode editar seu Número USP e nome; o encerramento do acesso de outro administrador depende de solicitação de demissão com motivo (prazo de 7 dias para aceitar ou recusar).
         </p>
         <form id="form-add-admin-user" class="admin-inline-form">
           <div class="form-field" style="min-width:160px;">
@@ -4887,6 +5048,14 @@ async function renderParamsAndAudit() {
             <tbody>
               ${admins.map((u) => {
                 const isSelf = state.currentUser && Number(state.currentUser.id) === Number(u.id);
+                let actionHtml = '<span class="muted">Inativo</span>';
+                if (isSelf) {
+                  actionHtml = `<button class="btn btn-sm btn-primary js-edit-self-adm" data-id="${u.id}" type="button">Editar meu perfil</button>`;
+                } else if (u.pending_dismissal) {
+                  actionHtml = `<span class="badge badge-warn">Demissão pendente (até ${esc(fmtDateLocalBr(u.pending_dismissal.expires_at))})</span>`;
+                } else if (u.is_active) {
+                  actionHtml = `<button class="btn btn-sm btn-danger js-dismiss-adm" data-id="${u.id}" type="button">Demitir</button>`;
+                }
                 return `
                   <tr>
                     <td class="mono">${esc(u.numero_usp)}</td>
@@ -4895,11 +5064,7 @@ async function renderParamsAndAudit() {
                     <td>${esc(u.created_by || "—")}</td>
                     <td>
                       <span class="row-actions">
-                        ${isSelf
-                          ? `<button class="btn btn-sm btn-primary js-edit-self-adm" data-id="${u.id}" type="button">Editar meu perfil</button>`
-                          : `<button class="btn btn-sm btn-secondary js-toggle-adm" data-id="${u.id}" data-active="${u.is_active ? "1" : "0"}" type="button">${u.is_active ? "Desativar" : "Ativar"}</button>
-                             <button class="btn btn-sm btn-danger js-del-adm" data-id="${u.id}" type="button">Excluir</button>`
-                        }
+                        ${actionHtml}
                       </span>
                     </td>
                   </tr>
@@ -4908,6 +5073,43 @@ async function renderParamsAndAudit() {
             </tbody>
           </table>
         </div>
+        ${dismissals.length ? `
+          <h3 style="margin:18px 0 8px;font-size:0.95rem;">Solicitações de Demissão</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Administrador</th>
+                  <th>Solicitado por</th>
+                  <th>Motivo</th>
+                  <th>Prazo (7 dias)</th>
+                  <th>Situação</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${dismissals.map((d) => {
+                  const st = DISMISSAL_STATUS_META[d.status] || { label: d.status, cls: "badge-muted" };
+                  const isTargetPending =
+                    d.status === "pending" &&
+                    state.currentUser &&
+                    Number(state.currentUser.id) === Number(d.target_user_id);
+                  return `
+                    <tr>
+                      <td><strong>${esc(d.target_nome)}</strong> <span class="mono muted">(NUSP ${esc(d.target_numero_usp)})</span></td>
+                      <td>${esc(d.requested_by_nome || "—")}</td>
+                      <td>${esc(d.reason)}</td>
+                      <td class="mono">${esc(fmtDateLocalBr(d.created_at))} → ${esc(fmtDateLocalBr(d.expires_at))}</td>
+                      <td>
+                        <span class="badge ${st.cls}">${esc(st.label)}</span>
+                        ${isTargetPending ? `<button class="btn btn-sm btn-danger js-respond-dismissal-row" data-id="${d.id}" type="button" style="margin-left:6px;">Responder</button>` : ""}
+                      </td>
+                    </tr>
+                  `;
+                }).join("")}
+              </tbody>
+            </table>
+          </div>
+        ` : ""}
       </div>
     </div>
 
@@ -4995,33 +5197,17 @@ async function renderParamsAndAudit() {
     });
   });
 
-  el.querySelectorAll(".js-toggle-adm").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const uid = Number(btn.dataset.id);
-      const nextActive = btn.dataset.active !== "1";
-      try {
-        await apiFetch(`/api/admin/users/${uid}`, {
-          method: "PUT",
-          body: JSON.stringify({ is_active: nextActive }),
-        });
-        showToast(nextActive ? "Administrador reativado!" : "Administrador desativado!");
-        renderParamsAndAudit();
-      } catch (err) {
-        showToast(err.message, true);
-      }
+  el.querySelectorAll(".js-dismiss-adm").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const u = admins.find((x) => Number(x.id) === Number(btn.dataset.id));
+      if (u) openDismissAdminModal(u, () => renderParamsAndAudit());
     });
   });
 
-  el.querySelectorAll(".js-del-adm").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      if (!confirm("Remover este administrador da lista de acesso?")) return;
-      try {
-        await apiFetch(`/api/admin/users/${btn.dataset.id}`, { method: "DELETE" });
-        showToast("Administrador removido.");
-        renderParamsAndAudit();
-      } catch (err) {
-        showToast(err.message, true);
-      }
+  el.querySelectorAll(".js-respond-dismissal-row").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const d = dismissals.find((x) => Number(x.id) === Number(btn.dataset.id));
+      if (d) openRespondDismissalModal(d);
     });
   });
 
@@ -5223,6 +5409,7 @@ async function openLoginModal() {
       state.currentUser = res.user || null;
       closeModal();
       updateAuthUI();
+      applyAuthDismissals(res.pending_dismissals);
       startCollabPolling();
       showToast(state.currentUser?.nome ? `Bem-vindo(a), ${state.currentUser.nome}!` : "Modo Administrador ativado.");
       loadActiveTab();
@@ -5294,6 +5481,9 @@ function enhanceWideTables(container = document) {
 async function init() {
   document.querySelectorAll(".tab").forEach((btn) => {
     btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+  });
+  document.getElementById("mobile-tab-select")?.addEventListener("change", (e) => {
+    if (e.target.value) switchTab(e.target.value);
   });
 
   document.querySelector(".brand-logo-link")?.addEventListener("click", (e) => {
@@ -5382,6 +5572,7 @@ async function init() {
     state.isAdmin = Boolean(auth.is_admin);
     state.needsBootstrap = Boolean(auth.needs_bootstrap);
     state.currentUser = auth.user || null;
+    state.collab.pending_dismissals = Array.isArray(auth.pending_dismissals) ? auth.pending_dismissals : [];
   } catch {
     state.isAdmin = false;
     state.currentUser = null;
