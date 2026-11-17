@@ -1869,9 +1869,17 @@ class LSEEController:
         content_type = f"{ctype}; charset=utf-8" if ctype.startswith(("text/", "application/javascript")) else ctype
         resp = Response(target.read_bytes(), status=HTTPStatus.OK, mimetype=ctype)
         resp.headers["Content-Type"] = content_type
-        resp.headers["Cache-Control"] = "no-store"
+        if clean == "index.html":
+            resp.headers["Cache-Control"] = "public, max-age=60, s-maxage=3600, stale-while-revalidate=86400"
+        else:
+            resp.headers["Cache-Control"] = "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800"
         resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["X-Frame-Options"] = "DENY"
+        return resp
+
+    def _with_public_cache(self, resp: Response) -> Response:
+        if resp.status_code == HTTPStatus.OK:
+            resp.headers["Cache-Control"] = "public, max-age=10, s-maxage=30, stale-while-revalidate=60"
         return resp
 
     # ---------------- GET ----------------
@@ -1916,23 +1924,23 @@ class LSEEController:
 
             if path == "/api/public/dashboard":
                 self._handle_public_dashboard()
-                return self._response  # type: ignore[return-value]
+                return self._with_public_cache(self._response)  # type: ignore[arg-type]
 
             if path == "/api/public/computers":
                 self._handle_public_computers()
-                return self._response  # type: ignore[return-value]
+                return self._with_public_cache(self._response)  # type: ignore[arg-type]
 
             if path == "/api/public/simulator":
                 pc_id = (qs.get("pc", [""])[0] or "").strip()
                 self._handle_public_simulator(pc_id)
-                return self._response  # type: ignore[return-value]
+                return self._with_public_cache(self._response)  # type: ignore[arg-type]
 
             if path == "/api/public/score-info":
                 self._handle_public_score_info()
-                return self._response  # type: ignore[return-value]
+                return self._with_public_cache(self._response)  # type: ignore[arg-type]
             if path == "/api/public/map":
                 self._handle_public_map()
-                return self._response  # type: ignore[return-value]
+                return self._with_public_cache(self._response)  # type: ignore[arg-type]
 
             if path == "/api/public/usage-rules":
                 with db_session() as conn:
@@ -1945,7 +1953,7 @@ class LSEEController:
                         "updated_at": (row["updated_at"] or "") if row else "",
                     }
                 )
-                return self._response  # type: ignore[return-value]
+                return self._with_public_cache(self._response)  # type: ignore[arg-type]
 
             # Rotas administrativas (exigem sessão válida)
             if path.startswith("/api/admin/"):

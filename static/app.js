@@ -754,11 +754,25 @@ function scheduleNextCollabPoll() {
     state.collab.timer = null;
   }
   if (!state.isAdmin || typeof setTimeout !== "function") return;
-  const delay = state.collab.chatOpen ? 6000 : 12000;
+  if (typeof document !== "undefined" && document.hidden) return;
+  const delay = state.collab.chatOpen ? 15000 : 45000;
   state.collab.timer = setTimeout(async () => {
+    if (typeof document !== "undefined" && document.hidden) return;
     await pollCollab(true);
     scheduleNextCollabPoll();
   }, delay);
+}
+
+if (typeof document !== "undefined" && !document.__lseeCollabVisibilityBound) {
+  document.__lseeCollabVisibilityBound = true;
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && state.isAdmin) {
+      pollCollab(true).then(() => scheduleNextCollabPoll());
+    } else if (document.hidden && state.collab.timer) {
+      clearTimeout(state.collab.timer);
+      state.collab.timer = null;
+    }
+  });
 }
 
 function startCollabPolling() {
