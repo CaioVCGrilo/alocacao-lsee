@@ -323,6 +323,7 @@ SCHEMA_STATEMENTS = [
         requested_by_user_id INT NOT NULL,
         requested_by_nome VARCHAR(255) NOT NULL,
         reason TEXT NOT NULL,
+        request_type VARCHAR(32) NOT NULL DEFAULT 'dismissal',
         status VARCHAR(32) NOT NULL DEFAULT 'pending',
         created_at VARCHAR(100) NOT NULL,
         expires_at VARCHAR(100) NOT NULL,
@@ -483,6 +484,12 @@ def ensure_schema_columns(conn: MySQLConnectionWrapper) -> None:
         conn.execute("SELECT actor FROM audit_log LIMIT 1").fetchone()
     except Exception:
         conn.execute("ALTER TABLE audit_log ADD COLUMN actor VARCHAR(255) DEFAULT ''")
+    try:
+        conn.execute("SELECT request_type FROM admin_dismissal_requests LIMIT 1").fetchone()
+    except Exception:
+        conn.execute(
+            "ALTER TABLE admin_dismissal_requests ADD COLUMN request_type VARCHAR(32) NOT NULL DEFAULT 'dismissal'"
+        )
 
 
 def init_schema() -> None:

@@ -623,13 +623,22 @@ function renderCollabUI() {
   if (dismissalBanner) {
     if (pendingDismissals.length > 0) {
       const firstD = pendingDismissals[0];
+      const rtype = firstD.request_type || "dismissal";
+      let bannerHtml = "";
+      let btnText = "Visualizar e responder";
+      if (rtype === "resignation") {
+        bannerHtml = `<strong>Pedido de demissão pendente:</strong> <strong>${esc(firstD.target_nome || firstD.requested_by_nome || "Administrador")}</strong> pediu desligamento e aguarda aprovação de outro ADM (prazo até ${esc(fmtDateTimeLocalShort(firstD.expires_at))}).`;
+        btnText = "Analisar pedido";
+      } else if (rtype === "reactivation") {
+        bannerHtml = `<strong>Solicitação de retorno:</strong> <strong>${esc(firstD.target_nome || "Administrador")}</strong> (NUSP ${esc(firstD.target_numero_usp)}) solicitou reativação do acesso.`;
+        btnText = "Analisar retorno";
+      } else {
+        bannerHtml = `<strong>Solicitação de demissão pendente</strong> enviada por <strong>${esc(firstD.requested_by_nome || "Administrador")}</strong> (prazo até ${esc(fmtDateTimeLocalShort(firstD.expires_at))}).`;
+      }
       dismissalBanner.classList.remove("hidden");
       dismissalBanner.innerHTML = `
-        <div>
-          <strong>Solicitação de demissão pendente</strong> enviada por <strong>${esc(firstD.requested_by_nome || "Administrador")}</strong>
-          (prazo até ${esc(fmtDateTimeLocalShort(firstD.expires_at))}).
-        </div>
-        <button class="btn btn-sm btn-danger js-respond-dismissal" type="button">Visualizar e responder</button>
+        <div>${bannerHtml}</div>
+        <button class="btn btn-sm btn-danger js-respond-dismissal" type="button">${esc(btnText)}</button>
       `;
       dismissalBanner.querySelector(".js-respond-dismissal")?.addEventListener("click", () => {
         openRespondDismissalModal(firstD);
@@ -2482,7 +2491,7 @@ async function renderCriterios() {
       <div class="card">
         <div class="card-header">
           <h2 class="card-title">Pesos do Score e Regras Gerais</h2>
-          <button id="btn-edit-criterios" class="btn btn-primary btn-sm" type="button">Editar Critérios</button>
+          <button id="btn-goto-params" class="btn btn-secondary btn-sm" type="button">Alterar em Parâmetros</button>
         </div>
         <div class="card-body">
           <table>
@@ -2500,7 +2509,7 @@ async function renderCriterios() {
       <div class="card">
         <div class="card-header">
           <h2 class="card-title">Prioridade por Categoria</h2>
-          <button class="btn btn-secondary btn-sm js-edit-criterios" type="button">Editar</button>
+          <button class="btn btn-primary btn-sm js-edit-criterios" type="button">Editar Categorias e RAM</button>
         </div>
         <div class="card-body">
           <table>
@@ -2595,7 +2604,7 @@ async function renderCriterios() {
     </div>
   `;
 
-  document.getElementById("btn-edit-criterios").addEventListener("click", () => openCriteriosModal(data));
+  document.getElementById("btn-goto-params")?.addEventListener("click", () => switchTab("parametros"));
   el.querySelectorAll(".js-edit-criterios").forEach((btn) => {
     btn.addEventListener("click", () => openCriteriosModal(data));
   });
@@ -2609,43 +2618,26 @@ async function renderCriterios() {
 }
 
 function openCriteriosModal(data) {
-  const pct = (v) => Number((Number(v || 0) * 100).toFixed(2));
   const ramRows = [...(data.thresholds?.ram || [])].sort((a, b) => Number(a.min_value) - Number(b.min_value));
   const cats = (data.categories || []).map((c) => ({ ...c }));
 
   const ramRowHtml = (mv = "", sc = "") => `
     <tr class="js-crit-ram-row">
       <td><input class="input js-crit-ram-gb" type="number" min="0" step="any" value="${esc(mv)}" required style="width:100%;" /></td>
-      <td><input class="input js-crit-ram-score" type="number" min="0" max="100" step="any" value="${esc(sc)}" required style="width:100%;" /></td>
+      <td><input class="input js-crit-ram-score" type="number" min="0" max="${esc(data.score_maximo || 10)}" step="any" value="${esc(sc)}" required style="width:100%;" /></td>
       <td style="width:44px;text-align:center;"><button class="btn btn-sm btn-danger js-crit-ram-del" type="button" title="Remover faixa">&times;</button></td>
     </tr>
   `;
 
-  openModal("Editar Critérios e Pesos", `
+  openModal("Editar Faixas de RAM e Categorias", `
+    <p class="muted" style="margin-top:0;font-size:0.84rem;">
+      Pesos, diferença mínima para upgrade e parâmetros de armazenamento ficam centralizados na aba <strong>Parâmetros &amp; Log</strong>.
+    </p>
     <form id="form-criterios">
-      <div class="card" style="margin-bottom:12px;">
-        <div class="card-header">
-          <h3 class="card-title" style="font-size:0.9rem;">Pesos das Notas (%) e Regras Gerais</h3>
-          <span id="crit-weight-sum" class="badge badge-ok">Soma: 100.0%</span>
-        </div>
-        <div class="card-body">
-          <div class="form-grid">
-            <div class="form-field"><label>Peso CPU (%)</label><input class="input js-crit-weight" name="w_cpu" type="number" min="0" max="100" step="0.1" value="${pct(data.pesos.cpu)}" required /></div>
-            <div class="form-field"><label>Peso RAM (%)</label><input class="input js-crit-weight" name="w_ram" type="number" min="0" max="100" step="0.1" value="${pct(data.pesos.ram)}" required /></div>
-            <div class="form-field"><label>Peso Armazenamento (%)</label><input class="input js-crit-weight" name="w_arm" type="number" min="0" max="100" step="0.1" value="${pct(data.pesos.armazenamento)}" required /></div>
-            <div class="form-field"><label>Peso GPU (%)</label><input class="input js-crit-weight" name="w_gpu" type="number" min="0" max="100" step="0.1" value="${pct(data.pesos.gpu)}" required /></div>
-            <div class="form-field"><label>Diferença mínima p/ upgrade</label><input class="input" name="diff_min" type="number" min="0" step="any" value="${esc(data.diferenca_minima_upgrade)}" required /></div>
-            <div class="form-field"><label>Score máximo componente</label><input class="input" name="score_max" type="number" min="1" max="100" step="any" value="${esc(data.score_maximo)}" required /></div>
-            <div class="form-field"><label>Peso relativo HD (% do SSD)</label><input class="input" name="peso_hd_pct" type="number" min="0" max="200" step="any" value="${pct(data.armaz_peso_hd)}" required /></div>
-            <div class="form-field"><label>Fator suavização log (GB eq.)</label><input class="input" name="escala_log" type="number" min="1" step="any" value="${esc(data.armaz_escala_log)}" required /></div>
-          </div>
-        </div>
-      </div>
-
       <div class="grid-2" style="margin-bottom:12px;">
         <div class="card" style="margin-bottom:0;">
           <div class="card-header">
-            <h3 class="card-title" style="font-size:0.9rem;">Score por Faixa de RAM</h3>
+            <h3 class="card-title" style="font-size:0.9rem;">Score por Faixa de RAM (teto: ${esc(data.score_maximo)})</h3>
             <button id="btn-crit-add-ram" class="btn btn-sm btn-secondary" type="button">+ Faixa</button>
           </div>
           <div class="card-body">
@@ -2685,23 +2677,10 @@ function openCriteriosModal(data) {
 
       <div class="form-actions" style="margin-top:0;">
         <button class="btn btn-secondary" type="button" onclick="closeModal()">Cancelar</button>
-        <button class="btn btn-primary" type="submit">Salvar Critérios</button>
+        <button class="btn btn-primary" type="submit">Salvar Faixas e Categorias</button>
       </div>
     </form>
   `, true);
-
-  const updateWeightBadge = () => {
-    const sum = [...document.querySelectorAll(".js-crit-weight")]
-      .reduce((acc, inp) => acc + (Number(inp.value) || 0), 0);
-    const badge = document.getElementById("crit-weight-sum");
-    const valid = Math.abs(sum - 100) <= 0.2;
-    badge.textContent = `Soma: ${sum.toFixed(1)}%`;
-    badge.className = `badge ${valid ? "badge-ok" : "badge-danger"}`;
-  };
-  document.querySelectorAll(".js-crit-weight").forEach((inp) => {
-    inp.addEventListener("input", updateWeightBadge);
-  });
-  updateWeightBadge();
 
   const ramTbody = document.getElementById("crit-ram-tbody");
   ramTbody.addEventListener("click", (e) => {
@@ -2719,17 +2698,6 @@ function openCriteriosModal(data) {
 
   document.getElementById("form-criterios").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const fd = new FormData(e.target);
-    const wCpu = Number(fd.get("w_cpu"));
-    const wRam = Number(fd.get("w_ram"));
-    const wArm = Number(fd.get("w_arm"));
-    const wGpu = Number(fd.get("w_gpu"));
-    const sum = wCpu + wRam + wArm + wGpu;
-    if (Math.abs(sum - 100) > 0.2) {
-      showToast(`A soma dos 4 pesos deve ser 100% (atual: ${sum.toFixed(1)}%).`, true);
-      return;
-    }
-
     const ram_thresholds = [...ramTbody.querySelectorAll(".js-crit-ram-row")].map((tr) => ({
       min_value: Number(tr.querySelector(".js-crit-ram-gb").value),
       score: Number(tr.querySelector(".js-crit-ram-score").value),
@@ -2747,23 +2715,10 @@ function openCriteriosModal(data) {
     try {
       await apiFetch("/api/admin/rules", {
         method: "PUT",
-        body: JSON.stringify({
-          pesos: {
-            cpu: wCpu / 100,
-            ram: wRam / 100,
-            armazenamento: wArm / 100,
-            gpu: wGpu / 100,
-          },
-          diferenca_minima_upgrade: Number(fd.get("diff_min")),
-          score_maximo: Number(fd.get("score_max")),
-          armaz_peso_hd: Number(fd.get("peso_hd_pct")) / 100,
-          armaz_escala_log: Number(fd.get("escala_log")),
-          ram_thresholds,
-          categories,
-        }),
+        body: JSON.stringify({ ram_thresholds, categories }),
       });
       closeModal();
-      showToast("Critérios atualizados! Scores recalculados.");
+      showToast("Faixas de RAM e categorias atualizadas!");
       renderCriterios();
     } catch (err) {
       showToast(err.message, true);
@@ -3033,7 +2988,12 @@ async function renderAllocations() {
                   <td>${esc(a.motivo_inicio || "—")}</td>
                   <td>${a.ativa ? '<span class="badge badge-uso">Ativa</span>' : '<span class="badge badge-muted">Encerrada</span>'}</td>
                   <td>${esc(a.observacoes || "—")}</td>
-                  <td>${a.ativa ? `<button class="btn btn-sm btn-danger js-close-aloc" data-id="${a.id}" data-label="${esc(a.id_alocacao)}" type="button">Encerrar</button>` : "—"}</td>
+                  <td>
+                    <span class="row-actions">
+                      <button class="btn btn-sm btn-secondary js-edit-aloc-obs" data-id="${a.id}" type="button">Editar Obs.</button>
+                      ${a.ativa ? `<button class="btn btn-sm btn-danger js-close-aloc" data-id="${a.id}" data-label="${esc(a.id_alocacao)}" type="button">Encerrar</button>` : ""}
+                    </span>
+                  </td>
                 </tr>
               `).join("")}
             </tbody>
@@ -3049,8 +3009,48 @@ async function renderAllocations() {
   });
   document.getElementById("btn-aloc-tutorial").addEventListener("click", openReleaseTutorialModal);
   document.getElementById("btn-new-aloc").addEventListener("click", () => openNewAllocationModal(data.people, data.pcs));
+  el.querySelectorAll(".js-edit-aloc-obs").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const aloc = data.items.find((x) => Number(x.id) === Number(btn.dataset.id));
+      if (aloc) openEditAllocationObsModal(aloc);
+    });
+  });
   el.querySelectorAll(".js-close-aloc").forEach((btn) => {
     btn.addEventListener("click", () => openCloseAllocationModal(btn.dataset.id, btn.dataset.label));
+  });
+}
+
+function openEditAllocationObsModal(aloc) {
+  openModal(`Editar Observações — ${aloc.id_alocacao}`, `
+    <p class="muted" style="margin-top:0;font-size:0.84rem;">
+      <strong>${esc(aloc.pessoa_nome)}</strong> · <span class="mono">${esc(aloc.pc_id_pc)}</span> (${esc(aloc.tipo)})
+    </p>
+    <form id="form-edit-aloc-obs">
+      <div class="form-field">
+        <label for="aloc-obs-input">Observações</label>
+        <textarea id="aloc-obs-input" class="input" name="observacoes" rows="4" placeholder="Escreva as observações desta alocação...">${esc(aloc.observacoes || "")}</textarea>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-secondary" type="button" onclick="closeModal()">Cancelar</button>
+        <button class="btn btn-primary" type="submit">Salvar Observações</button>
+      </div>
+    </form>
+  `);
+  setTimeout(() => document.getElementById("aloc-obs-input")?.focus(), 40);
+  document.getElementById("form-edit-aloc-obs").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const payload = Object.fromEntries(new FormData(e.target).entries());
+    try {
+      await apiFetch(`/api/admin/allocations/${aloc.id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      closeModal();
+      showToast("Observações da alocação atualizadas!");
+      renderAllocations();
+    } catch (err) {
+      showToast(err.message, true);
+    }
   });
 }
 
@@ -3517,7 +3517,7 @@ async function renderLabels() {
             <div class="labels-mode-switch">
               <button class="labels-mode-btn ${ls.mode === "pc" ? "active" : ""}" id="btn-lbl-mode-pc" type="button">PCs</button>
               <button class="labels-mode-btn ${ls.mode === "monitor" ? "active" : ""}" id="btn-lbl-mode-mon" type="button">Monitores</button>
-              <button class="labels-mode-btn ${ls.mode === "placa" ? "active" : ""}" id="btn-lbl-mode-placa" type="button">Placas / Livre</button>
+              <button class="labels-mode-btn ${ls.mode === "placa" ? "active" : ""}" id="btn-lbl-mode-placa" type="button">Geral</button>
             </div>
 
             ${ls.mode === "placa" ? `
@@ -4917,7 +4917,7 @@ function openEditSelfAdminModal(user, onSaved) {
 function openDismissAdminModal(user, onSaved) {
   openModal(`Demitir Administrador — ${user.nome}`, `
     <p class="muted" style="margin-top:0;font-size:0.84rem;">
-      A solicitação com o motivo será enviada para <strong>${esc(user.nome)}</strong> (NUSP <span class="mono">${esc(user.numero_usp)}</span>), que terá <strong>7 dias</strong> para aceitar ou recusar a demissão.
+      A solicitação com o motivo será enviada para <strong>${esc(user.nome)}</strong> (NUSP <span class="mono">${esc(user.numero_usp)}</span>), que terá <strong>7 dias</strong> para aceitar ou recusar. Sem resposta após 7 dias, o acesso é desativado automaticamente.
     </p>
     <form id="form-dismiss-adm">
       <div class="form-field">
@@ -4949,22 +4949,75 @@ function openDismissAdminModal(user, onSaved) {
   });
 }
 
-function openRespondDismissalModal(d) {
-  openModal("Solicitação de Demissão Recebida", `
-    <p class="muted" style="margin-top:0;font-size:0.86rem;">
-      <strong>${esc(d.requested_by_nome || "Administrador")}</strong> enviou uma solicitação para encerrar o seu acesso administrativo.
-      Você tem até <strong>${esc(fmtDateTimeLocalShort(d.expires_at))}</strong> (7 dias) para responder.
+function openSelfResignModal(user, onSaved) {
+  openModal("Pedir Demissão de Administrador", `
+    <p class="muted" style="margin-top:0;font-size:0.84rem;">
+      Seu pedido será enviado para aprovação dos demais administradores ativos. Você só será desativado se outro administrador aprovar dentro de <strong>7 dias</strong>; caso expire sem resposta, você permanecerá ativo.
     </p>
+    <form id="form-self-resign">
+      <div class="form-field">
+        <label for="resign-reason">Motivo (opcional)</label>
+        <textarea id="resign-reason" class="input" name="reason" rows="3" placeholder="Ex.: Conclusão das atividades no laboratório..."></textarea>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-secondary" type="button" onclick="closeModal()">Cancelar</button>
+        <button class="btn btn-danger" type="submit">Enviar pedido de demissão</button>
+      </div>
+    </form>
+  `);
+  setTimeout(() => document.getElementById("resign-reason")?.focus(), 40);
+  document.getElementById("form-self-resign").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const payload = Object.fromEntries(new FormData(e.target).entries());
+    try {
+      await apiFetch("/api/admin/resignations", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      closeModal();
+      pollCollab(true);
+      showToast("Pedido de demissão enviado para aprovação (prazo de 7 dias).");
+      if (onSaved) onSaved();
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  });
+}
+
+function openRespondDismissalModal(d) {
+  const rtype = d.request_type || "dismissal";
+  let modalTitle = "Solicitação de Demissão Recebida";
+  let introHtml = `<strong>${esc(d.requested_by_nome || "Administrador")}</strong> enviou uma solicitação para encerrar o seu acesso administrativo. Você tem até <strong>${esc(fmtDateTimeLocalShort(d.expires_at))}</strong> (7 dias) para responder.`;
+  let reasonLbl = "Motivo informado:";
+  let helpHtml = "<strong>Aceitar demissão</strong> desativa seu acesso e encerra sua sessão imediatamente. <strong>Recusar demissão</strong> mantém seu acesso ativo. Sem resposta após 7 dias, a conta é desativada automaticamente.";
+  let rejectLabel = "Recusar demissão";
+  let acceptLabel = "Aceitar demissão";
+
+  if (rtype === "resignation") {
+    modalTitle = "Pedido de Demissão para Aprovação";
+    introHtml = `<strong>${esc(d.target_nome || d.requested_by_nome || "Administrador")}</strong> (NUSP <span class="mono">${esc(d.target_numero_usp)}</span>) pediu demissão do cargo administrativo. Prazo para análise: <strong>${esc(fmtDateTimeLocalShort(d.expires_at))}</strong> (7 dias).`;
+    helpHtml = "<strong>Aprovar demissão</strong> desativa o acesso desse administrador. <strong>Recusar pedido</strong> mantém o acesso ativo. Sem resposta após 7 dias, o pedido expira e ele não será demitido.";
+    rejectLabel = "Recusar pedido";
+    acceptLabel = "Aprovar demissão";
+  } else if (rtype === "reactivation") {
+    modalTitle = "Solicitação de Retorno de Administrador";
+    introHtml = `O ex-administrador <strong>${esc(d.target_nome || "Administrador")}</strong> (NUSP <span class="mono">${esc(d.target_numero_usp)}</span>) tentou acessar o sistema e solicitou reativação da conta.`;
+    reasonLbl = "Motivo para retornar:";
+    helpHtml = "<strong>Aprovar retorno</strong> reativa o Número USP para login administrativo. <strong>Recusar retorno</strong> mantém o acesso bloqueado.";
+    rejectLabel = "Recusar retorno";
+    acceptLabel = "Aprovar retorno";
+  }
+
+  openModal(modalTitle, `
+    <p class="muted" style="margin-top:0;font-size:0.86rem;">${introHtml}</p>
     <div style="background:var(--surface-alt);border:1px solid var(--border);border-radius:8px;padding:12px;margin:12px 0;">
-      <div style="font-size:0.78rem;color:var(--muted);margin-bottom:4px;">Motivo informado:</div>
+      <div style="font-size:0.78rem;color:var(--muted);margin-bottom:4px;">${esc(reasonLbl)}</div>
       <div style="white-space:pre-wrap;font-size:0.9rem;">${esc(d.reason)}</div>
     </div>
-    <p class="muted" style="font-size:0.8rem;margin-bottom:14px;">
-      <strong>Aceitar demissão</strong> desativa seu acesso administrativo e encerra sua sessão imediatamente. <strong>Recusar demissão</strong> mantém seu acesso ativo.
-    </p>
+    <p class="muted" style="font-size:0.8rem;margin-bottom:14px;">${helpHtml}</p>
     <div class="form-actions">
-      <button class="btn btn-secondary" id="btn-dismissal-reject" type="button">Recusar demissão</button>
-      <button class="btn btn-danger" id="btn-dismissal-accept" type="button">Aceitar demissão</button>
+      <button class="btn btn-secondary" id="btn-dismissal-reject" type="button">${esc(rejectLabel)}</button>
+      <button class="btn btn-danger" id="btn-dismissal-accept" type="button">${esc(acceptLabel)}</button>
     </div>
   `);
   const handleDecision = async (decision) => {
@@ -4987,7 +5040,13 @@ function openRespondDismissalModal(d) {
         );
         renderCollabUI();
         pollCollab(true);
-        showToast("Demissão recusada. Seu acesso foi mantido.");
+        if (rtype === "reactivation") {
+          showToast(decision === "accept" ? "Retorno aprovado! O administrador já pode fazer login." : "Solicitação de retorno recusada.");
+        } else if (rtype === "resignation") {
+          showToast(decision === "accept" ? "Pedido de demissão aprovado." : "Pedido de demissão recusado.");
+        } else {
+          showToast("Demissão recusada. Seu acesso foi mantido.");
+        }
         if (state.activeTab === "parametros") renderParamsAndAudit();
       }
     } catch (err) {
@@ -5000,9 +5059,15 @@ function openRespondDismissalModal(d) {
 
 const DISMISSAL_STATUS_META = {
   pending: { label: "Pendente", cls: "badge-warn" },
-  accepted: { label: "Aceita", cls: "badge-danger" },
+  accepted: { label: "Aprovada / Aceita", cls: "badge-danger" },
   rejected: { label: "Recusada", cls: "badge-livre" },
   expired: { label: "Expirada (7d)", cls: "badge-muted" },
+};
+
+const DISMISSAL_TYPE_META = {
+  dismissal: "Demissão",
+  resignation: "Pedido próprio",
+  reactivation: "Retorno",
 };
 
 /* ==================== PARÂMETROS & LOG (ADMIN) ==================== */
@@ -5015,13 +5080,41 @@ async function renderParamsAndAudit() {
   ]);
   const admins = uData.items || [];
   const dismissals = uData.dismissals || [];
+  const activeAdminCount = admins.filter((x) => x.is_active).length;
+
+  const paramMap = Object.fromEntries((pData.params || []).map((pm) => [pm.key, pm]));
+  const weightDefs = [
+    { key: "peso_cpu", label: "Peso CPU (%)", fallback: "0.45" },
+    { key: "peso_ram", label: "Peso RAM (%)", fallback: "0.3" },
+    { key: "peso_armazenamento", label: "Peso Armazenamento (%)", fallback: "0.225" },
+    { key: "peso_gpu", label: "Peso GPU (%)", fallback: "0.025" },
+  ];
+  const ruleKeys = new Set([
+    "peso_cpu",
+    "peso_ram",
+    "peso_armazenamento",
+    "peso_gpu",
+    "diferenca_minima_upgrade",
+    "score_maximo",
+    "armaz_peso_hd",
+    "armaz_escala_log",
+    "public_anonymize_names",
+  ]);
+  const pctVal = (k, fb) => Number((Number(String(paramMap[k]?.value ?? fb).replace(",", ".")) * 100).toFixed(2));
+  const otherParams = [
+    paramMap.diferenca_minima_upgrade || { key: "diferenca_minima_upgrade", label: "Diferença mínima para upgrade", value: "3" },
+    paramMap.score_maximo || { key: "score_maximo", label: "Score máximo componente", value: "10" },
+    paramMap.armaz_peso_hd || { key: "armaz_peso_hd", label: "Peso relativo do HD (Armazenamento)", value: "0.25" },
+    paramMap.armaz_escala_log || { key: "armaz_escala_log", label: "Fator de suavização log (GB_eq)", value: "60" },
+    paramMap.public_anonymize_names || { key: "public_anonymize_names", label: "Anonimizar nomes na visão pública (exibir ID Pessoa)?", value: "Não" },
+  ].filter((pm) => ruleKeys.has(pm.key));
 
   el.innerHTML = `
     <div class="card">
       <div class="card-header"><h2 class="card-title">Administradores Autorizados (Login por Número USP)</h2></div>
       <div class="card-body">
         <p class="muted" style="margin-top:0;font-size:0.84rem;">
-          Todos os administradores usam a mesma senha administrativa, porém o login só é liberado para os <strong>Números USP</strong> cadastrados e ativos abaixo. Apenas o próprio administrador pode editar seu Número USP e nome; o encerramento do acesso de outro administrador depende de solicitação de demissão com motivo (prazo de 7 dias para aceitar ou recusar).
+          Todos os administradores usam a mesma senha administrativa, porém o login só é liberado para os <strong>Números USP</strong> cadastrados e ativos abaixo. Apenas o próprio administrador edita seu Número USP e nome. Ao clicar em <strong>Demitir</strong> outro ADM, ele tem 7 dias para aceitar ou recusar (se não responder em 7 dias, é desativado automaticamente); já o pedido próprio de demissão expira sem desligar caso não haja aprovação em 7 dias.
         </p>
         <form id="form-add-admin-user" class="admin-inline-form">
           <div class="form-field" style="min-width:160px;">
@@ -5050,9 +5143,16 @@ async function renderParamsAndAudit() {
                 const isSelf = state.currentUser && Number(state.currentUser.id) === Number(u.id);
                 let actionHtml = '<span class="muted">Inativo</span>';
                 if (isSelf) {
-                  actionHtml = `<button class="btn btn-sm btn-primary js-edit-self-adm" data-id="${u.id}" type="button">Editar meu perfil</button>`;
+                  const resignPart = u.pending_resignation
+                    ? `<span class="badge badge-warn">Pedido enviado (até ${esc(fmtDateLocalBr(u.pending_resignation.expires_at))})</span>`
+                    : `<button class="btn btn-sm btn-secondary js-self-resign" type="button" ${activeAdminCount <= 1 ? 'disabled title="Cadastre outro administrador ativo antes de pedir demissão"' : ""}>Pedir demissão</button>`;
+                  actionHtml = `<button class="btn btn-sm btn-primary js-edit-self-adm" data-id="${u.id}" type="button">Editar meu perfil</button> ${resignPart}`;
                 } else if (u.pending_dismissal) {
                   actionHtml = `<span class="badge badge-warn">Demissão pendente (até ${esc(fmtDateLocalBr(u.pending_dismissal.expires_at))})</span>`;
+                } else if (u.pending_resignation) {
+                  actionHtml = `<span class="badge badge-warn">Pediu demissão</span> <button class="btn btn-sm btn-danger js-respond-dismissal-row" data-id="${u.pending_resignation.id}" type="button">Analisar</button>`;
+                } else if (u.pending_reactivation) {
+                  actionHtml = `<span class="badge badge-warn">Pediu retorno</span> <button class="btn btn-sm btn-primary js-respond-dismissal-row" data-id="${u.pending_reactivation.id}" type="button">Analisar</button>`;
                 } else if (u.is_active) {
                   actionHtml = `<button class="btn btn-sm btn-danger js-dismiss-adm" data-id="${u.id}" type="button">Demitir</button>`;
                 }
@@ -5074,11 +5174,12 @@ async function renderParamsAndAudit() {
           </table>
         </div>
         ${dismissals.length ? `
-          <h3 style="margin:18px 0 8px;font-size:0.95rem;">Solicitações de Demissão</h3>
+          <h3 style="margin:18px 0 8px;font-size:0.95rem;">Solicitações de Demissão e Retorno</h3>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
+                  <th>Tipo</th>
                   <th>Administrador</th>
                   <th>Solicitado por</th>
                   <th>Motivo</th>
@@ -5088,20 +5189,33 @@ async function renderParamsAndAudit() {
               </thead>
               <tbody>
                 ${dismissals.map((d) => {
-                  const st = DISMISSAL_STATUS_META[d.status] || { label: d.status, cls: "badge-muted" };
-                  const isTargetPending =
-                    d.status === "pending" &&
-                    state.currentUser &&
-                    Number(state.currentUser.id) === Number(d.target_user_id);
+                  const rtype = d.request_type || "dismissal";
+                  let st = DISMISSAL_STATUS_META[d.status] || { label: d.status, cls: "badge-muted" };
+                  if (d.status === "expired") {
+                    st = rtype === "dismissal"
+                      ? { label: "Expirada (7d · Desativado)", cls: "badge-danger" }
+                      : { label: "Expirada (7d · Mantido)", cls: "badge-muted" };
+                  } else if (d.status === "accepted" && rtype === "reactivation") {
+                    st = { label: "Retorno aprovado", cls: "badge-livre" };
+                  }
+                  const selfUid = Number(state.currentUser?.id || 0);
+                  const canRespond = d.status === "pending" && selfUid > 0 && (
+                    (rtype === "dismissal" && Number(d.target_user_id) === selfUid) ||
+                    ((rtype === "resignation" || rtype === "reactivation") && Number(d.target_user_id) !== selfUid)
+                  );
+                  const prazoStr = d.expires_at
+                    ? `${fmtDateLocalBr(d.created_at)} → ${fmtDateLocalBr(d.expires_at)}`
+                    : `${fmtDateLocalBr(d.created_at)} (retorno)`;
                   return `
                     <tr>
+                      <td><span class="badge badge-muted">${esc(DISMISSAL_TYPE_META[rtype] || rtype)}</span></td>
                       <td><strong>${esc(d.target_nome)}</strong> <span class="mono muted">(NUSP ${esc(d.target_numero_usp)})</span></td>
                       <td>${esc(d.requested_by_nome || "—")}</td>
                       <td>${esc(d.reason)}</td>
-                      <td class="mono">${esc(fmtDateLocalBr(d.created_at))} → ${esc(fmtDateLocalBr(d.expires_at))}</td>
+                      <td class="mono">${esc(prazoStr)}</td>
                       <td>
                         <span class="badge ${st.cls}">${esc(st.label)}</span>
-                        ${isTargetPending ? `<button class="btn btn-sm btn-danger js-respond-dismissal-row" data-id="${d.id}" type="button" style="margin-left:6px;">Responder</button>` : ""}
+                        ${canRespond ? `<button class="btn btn-sm btn-danger js-respond-dismissal-row" data-id="${d.id}" type="button" style="margin-left:6px;">Responder</button>` : ""}
                       </td>
                     </tr>
                   `;
@@ -5114,11 +5228,23 @@ async function renderParamsAndAudit() {
     </div>
 
     <div class="card">
-      <div class="card-header"><h2 class="card-title">Parâmetros do Sistema e Privacidade</h2></div>
+      <div class="card-header">
+        <h2 class="card-title">Parâmetros do Sistema e Privacidade</h2>
+        <span id="params-weight-sum" class="badge badge-ok">Soma dos pesos: 100.0%</span>
+      </div>
       <div class="card-body">
+        <p class="muted" style="margin-top:0;font-size:0.84rem;">
+          Configuração principal dos pesos do score, regras numéricas gerais e privacidade pública (os critérios por faixa de RAM, categorias e benchmarks de CPU ficam na aba <strong>Critérios</strong>).
+        </p>
         <form id="form-params">
           <div class="form-grid">
-            ${pData.params.map((pm) => {
+            ${weightDefs.map((wd) => `
+              <div class="form-field">
+                <label>${esc(wd.label)}</label>
+                <input class="input js-param-weight" type="number" min="0" max="100" step="0.1" name="${esc(wd.key)}" value="${pctVal(wd.key, wd.fallback)}" required />
+              </div>
+            `).join("")}
+            ${otherParams.map((pm) => {
               if (pm.key === "public_anonymize_names") {
                 return `
                   <div class="form-field">
@@ -5132,7 +5258,7 @@ async function renderParamsAndAudit() {
               return `
                 <div class="form-field">
                   <label>${esc(pm.label)}</label>
-                  <input class="input" name="${esc(pm.key)}" value="${esc(pm.value)}" />
+                  <input class="input" type="number" step="any" name="${esc(pm.key)}" value="${esc(pm.value)}" required />
                 </div>`;
             }).join("")}
           </div>
@@ -5197,6 +5323,12 @@ async function renderParamsAndAudit() {
     });
   });
 
+  el.querySelectorAll(".js-self-resign").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (state.currentUser) openSelfResignModal(state.currentUser, () => renderParamsAndAudit());
+    });
+  });
+
   el.querySelectorAll(".js-dismiss-adm").forEach((btn) => {
     btn.addEventListener("click", () => {
       const u = admins.find((x) => Number(x.id) === Number(btn.dataset.id));
@@ -5211,12 +5343,37 @@ async function renderParamsAndAudit() {
     });
   });
 
+  const updateParamWeightSum = () => {
+    const sum = [...el.querySelectorAll(".js-param-weight")].reduce(
+      (acc, inp) => acc + (Number(inp.value) || 0),
+      0
+    );
+    const badge = document.getElementById("params-weight-sum");
+    if (!badge) return;
+    const valid = Math.abs(sum - 100) <= 0.2;
+    badge.textContent = `Soma dos pesos: ${sum.toFixed(1)}%`;
+    badge.className = `badge ${valid ? "badge-ok" : "badge-danger"}`;
+  };
+  el.querySelectorAll(".js-param-weight").forEach((inp) => {
+    inp.addEventListener("input", updateParamWeightSum);
+  });
+  updateParamWeightSum();
+
   document.getElementById("form-params").addEventListener("submit", async (e) => {
     e.preventDefault();
     const payload = Object.fromEntries(new FormData(e.target).entries());
+    const wKeys = ["peso_cpu", "peso_ram", "peso_armazenamento", "peso_gpu"];
+    const wSum = wKeys.reduce((acc, k) => acc + (Number(payload[k]) || 0), 0);
+    if (Math.abs(wSum - 100) > 0.2) {
+      showToast(`A soma dos 4 pesos deve ser 100% (atual: ${wSum.toFixed(1)}%).`, true);
+      return;
+    }
+    for (const k of wKeys) {
+      payload[k] = String(Number((Number(payload[k]) / 100).toFixed(6)));
+    }
     try {
       await apiFetch("/api/admin/params", { method: "PUT", body: JSON.stringify({ params: payload }) });
-      showToast("Parâmetros atualizados!");
+      showToast("Parâmetros atualizados e scores recalculados!");
     } catch (err) {
       showToast(err.message, true);
     }
@@ -5262,7 +5419,7 @@ function openAdminHelpModal() {
       tab: "criterios",
       title: "5. Critérios & CPUs",
       items: [
-        "Clique em \"Editar Critérios\" para ajustar pesos das notas, faixas de RAM e prioridades por categoria.",
+        "Clique em \"Editar Categorias e RAM\" para ajustar faixas de RAM e prioridades por categoria (os pesos do score e parâmetros gerais ficam em Parâmetros & Log).",
         "Em \"+ Novo Processador\", siga o protocolo CPU-Z (2 execuções) para recalcular as notas automaticamente."
       ]
     },
@@ -5279,7 +5436,7 @@ function openAdminHelpModal() {
       title: "7. Alocações",
       items: [
         "Histórico de entregas e devoluções; bloqueia alocar PC já em uso e inclui o botão \"Tutorial: Liberar PC\".",
-        "Use \"Encerrar\" para liberar o PC mantendo todo o histórico."
+        "Use \"Editar Obs.\" para atualizar observações ou \"Encerrar\" para liberar o PC mantendo todo o histórico."
       ]
     },
     {
@@ -5293,7 +5450,7 @@ function openAdminHelpModal() {
       tab: "etiquetas",
       title: "9. Etiquetas",
       items: [
-        "Monte etiquetas de PCs, Monitores ou Placas / Livre na grade Pimaco 3×6 (18 posições/folha).",
+        "Monte etiquetas de PCs, Monitores ou Geral na grade Pimaco 3×6 (18 posições/folha).",
         "Visualize a prévia em escala real e exporte em PDF (1:1) ou Word (.docx) pronto para imprimir."
       ]
     },
@@ -5315,8 +5472,8 @@ function openAdminHelpModal() {
       tab: "parametros",
       title: "12. Parâmetros & Log",
       items: [
-        "Cadastre os Números USP autorizados no Modo Admin, ajuste pesos do score e acompanhe a auditoria identificando quem fez cada ação.",
-        "Use o indicador no topo e o mini chat à direita para coordenar alterações quando outro administrador estiver logado."
+        "Configuração principal de pesos do score, regras numéricas, privacidade, cadastro/demissão de ADMs (com pedidos próprios e aprovação de retorno) e auditoria completa.",
+        "Use o selo verde no topo e o mini chat à direita para conversar quando outro administrador estiver logado."
       ]
     }
   ];
@@ -5386,13 +5543,43 @@ async function openLoginModal() {
         <label for="login-password">Senha do Administrador</label>
         <input class="input" type="password" name="password" id="login-password" required />
       </div>
-      <div class="form-actions">
+      <div id="login-reactivation-box" class="hidden" style="margin-top:14px;padding:12px;border:1px solid #fda4af;border-radius:8px;background:var(--surface-alt);">
+        <p id="login-reactivation-info" class="muted" style="margin:0 0 8px;font-size:0.83rem;"></p>
+        <div class="form-field">
+          <label for="login-return-reason">Motivo para retornar</label>
+          <textarea class="input" id="login-return-reason" rows="3" minlength="5" placeholder="Explique por que solicita a reativação do seu acesso administrativo..."></textarea>
+        </div>
+        <div class="form-actions" style="margin-top:10px;margin-bottom:0;">
+          <button class="btn btn-primary" id="btn-submit-return" type="button">Enviar solicitação de retorno</button>
+        </div>
+      </div>
+      <div class="form-actions" id="login-main-actions">
         <button class="btn btn-secondary" type="button" onclick="closeModal()">Cancelar</button>
         <button class="btn btn-primary" type="submit">Entrar</button>
       </div>
     </form>
   `);
   setTimeout(() => document.getElementById("login-nusp")?.focus(), 40);
+  document.getElementById("btn-submit-return")?.addEventListener("click", async () => {
+    const nusp = document.getElementById("login-nusp")?.value || "";
+    const password = document.getElementById("login-password")?.value || "";
+    const reason = (document.getElementById("login-return-reason")?.value || "").trim();
+    if (reason.length < 5) {
+      showToast("Informe o motivo para retornar (mínimo de 5 caracteres).", true);
+      document.getElementById("login-return-reason")?.focus();
+      return;
+    }
+    try {
+      const res = await apiFetch("/api/auth/request-return", {
+        method: "POST",
+        body: JSON.stringify({ numero_usp: nusp, password, reason }),
+      });
+      closeModal();
+      showToast(res?.message || "Solicitação de retorno enviada! Aguarde aprovação de um administrador ativo.");
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  });
   document.getElementById("form-login").addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -5417,6 +5604,22 @@ async function openLoginModal() {
       if (err?.data?.code === "BOOTSTRAP_NAME_REQUIRED") {
         state.needsBootstrap = true;
         openLoginModal();
+      } else if (err?.data?.code === "ADMIN_REACTIVATION_REQUIRED") {
+        const box = document.getElementById("login-reactivation-box");
+        const info = document.getElementById("login-reactivation-info");
+        const reasonEl = document.getElementById("login-return-reason");
+        if (box && info) {
+          box.classList.remove("hidden");
+          const pend = err.data.pending_return;
+          const userLabel = err.data.nome ? `${err.data.nome} (NUSP ${err.data.numero_usp})` : `NUSP ${err.data.numero_usp}`;
+          info.innerHTML = pend
+            ? `A conta de <strong>${esc(userLabel)}</strong> está desativada. Já existe uma solicitação de retorno aguardando aprovação; você pode atualizar o motivo abaixo se desejar.`
+            : `A conta de <strong>${esc(userLabel)}</strong> foi desativada. Escreva abaixo o <strong>motivo para retornar</strong> para enviar uma solicitação aos administradores ativos.`;
+          if (reasonEl && pend?.reason && !reasonEl.value) {
+            reasonEl.value = pend.reason;
+          }
+          setTimeout(() => reasonEl?.focus(), 40);
+        }
       }
       showToast(err.message, true);
     }

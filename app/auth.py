@@ -213,7 +213,11 @@ def authenticate_admin_user(
     if user_row is None:
         return None, "Acesso negado: este Número USP não está cadastrado como administrador.", "UNREGISTERED_NUSP"
     if not int(user_row["is_active"] or 0):
-        return None, "Acesso negado: este Número USP administrativo está desativado.", "INACTIVE_NUSP"
+        return (
+            None,
+            "Sua conta administrativa está desativada. Informe o motivo para solicitar seu retorno.",
+            "INACTIVE_NUSP",
+        )
     return dict(user_row), "", "OK"
 
 

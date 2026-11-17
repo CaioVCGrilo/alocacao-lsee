@@ -103,6 +103,7 @@ def _resolve_session_claims(conn: Any, claims: Optional[Dict[str, Any]]) -> Opti
         nome = str(claims.get("nome") or "Administrador")
         return {"uid": 0, "nusp": "", "nome": nome, "sid": sid, "actor_label": nome}
 
+    _expire_overdue_dismissals(conn)
     user_row = conn.execute(
         "SELECT id, numero_usp, nome, is_active FROM admin_users WHERE id = ?",
         (uid,),
@@ -154,6 +155,7 @@ def _touch_admin_session(conn: Any, admin_info: Dict[str, Any], active_tab: str 
 
 
 def _perform_admin_login(conn: Any, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any], Optional[str]]:
+    _expire_overdue_dismissals(conn)
     nusp_raw = body.get("numero_usp", "")
     bootstrap_name = str(body.get("nome") or "").strip()
     pw = str(body.get("password") or "")
@@ -164,6 +166,47 @@ def _perform_admin_login(conn: Any, body: Dict[str, Any]) -> Tuple[int, Dict[str
     user, err_msg, code = authenticate_admin_user(conn, nusp_raw, pw, bootstrap_name)
     if not user:
         clean_nusp = normalize_nusp(nusp_raw)
+        if code == "INACTIVE_NUSP" and clean_nusp:
+            inactive_u = conn.execute(
+                "SELECT id, numero_usp, nome FROM admin_users WHERE numero_usp = ?",
+                (clean_nusp,),
+            ).fetchone()
+            pending_ret = None
+            if inactive_u:
+                pending_ret = conn.execute(
+                    """
+                    SELECT id, target_user_id, target_numero_usp, target_nome,
+                           requested_by_user_id, requested_by_nome, reason,
+                           COALESCE(request_type, 'dismissal') AS request_type,
+                           status, created_at, expires_at, responded_at
+                    FROM admin_dismissal_requests
+                    WHERE target_user_id = ?
+                      AND COALESCE(request_type, 'dismissal') = 'reactivation'
+                      AND status = 'pending'
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (int(inactive_u["id"]),),
+                ).fetchone()
+            _log_audit(
+                conn,
+                "ADMIN_LOGIN_INACTIVE",
+                f"NUSP {clean_nusp}",
+                "Tentativa de login com conta administrativa desativada",
+                actor=f"{inactive_u['nome']} ({clean_nusp})" if inactive_u else clean_nusp,
+            )
+            return (
+                HTTPStatus.FORBIDDEN,
+                {
+                    "error": err_msg,
+                    "needs_bootstrap": False,
+                    "code": "ADMIN_REACTIVATION_REQUIRED",
+                    "numero_usp": clean_nusp,
+                    "nome": inactive_u["nome"] if inactive_u else "",
+                    "pending_return": _format_dismissal_row(pending_ret) if pending_ret else None,
+                },
+                None,
+            )
         actor = clean_nusp or "Não identificado"
         _log_audit(conn, "ADMIN_LOGIN_FAILED", clean_nusp or "auth", f"{code}: {err_msg}", actor=actor)
         return (
@@ -290,14 +333,60 @@ def _get_collab_payload(conn: Any, admin_info: Dict[str, Any]) -> Dict[str, Any]
 
 def _expire_overdue_dismissals(conn: Any) -> None:
     now = _now_iso()
-    conn.execute(
+    overdue = conn.execute(
         """
-        UPDATE admin_dismissal_requests
-        SET status = 'expired', responded_at = ?
-        WHERE status = 'pending' AND expires_at < ?
+        SELECT id, target_user_id, target_numero_usp, target_nome,
+               requested_by_user_id, requested_by_nome, reason,
+               COALESCE(request_type, 'dismissal') AS request_type,
+               expires_at
+        FROM admin_dismissal_requests
+        WHERE status = 'pending' AND expires_at != '' AND expires_at < ?
+        ORDER BY id ASC
         """,
-        (now, now),
-    )
+        (now,),
+    ).fetchall()
+    for r in overdue:
+        d_id = int(r["id"])
+        target_uid = int(r["target_user_id"])
+        rtype = str(r["request_type"] or "dismissal").strip().lower()
+        conn.execute(
+            "UPDATE admin_dismissal_requests SET status = 'expired', responded_at = ? WHERE id = ?",
+            (now, d_id),
+        )
+        if rtype == "dismissal":
+            other_cnt = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM admin_users WHERE is_active = 1 AND id != ?",
+                (target_uid,),
+            ).fetchone()
+            if int((other_cnt["cnt"] if other_cnt else 0) or 0) > 0:
+                conn.execute("UPDATE admin_users SET is_active = 0 WHERE id = ?", (target_uid,))
+                conn.execute(
+                    "UPDATE admin_sessions SET logged_out_at = ? WHERE user_id = ? AND (logged_out_at IS NULL OR logged_out_at = '')",
+                    (now, target_uid),
+                )
+                _log_audit(
+                    conn,
+                    "EXPIRE_DISMISSAL_DEACTIVATED",
+                    f"NUSP {r['target_numero_usp']}",
+                    f"7 dias sem resposta; {r['target_nome']} desativado automaticamente — Motivo: {r['reason']}",
+                    actor="Sistema (7 dias)",
+                )
+            else:
+                _log_audit(
+                    conn,
+                    "EXPIRE_ADMIN_DISMISSAL",
+                    f"NUSP {r['target_numero_usp']}",
+                    f"Expirada após 7 dias sem outro administrador ativo para manter o sistema ({r['target_nome']})",
+                    actor="Sistema (7 dias)",
+                )
+        elif rtype == "resignation":
+            _log_audit(
+                conn,
+                "EXPIRE_ADMIN_RESIGNATION",
+                f"NUSP {r['target_numero_usp']}",
+                f"Pedido voluntário de demissão de {r['target_nome']} expirou após 7 dias sem aprovação; acesso mantido",
+                actor="Sistema (7 dias)",
+            )
 
 
 def _format_dismissal_row(r: Any) -> Dict[str, Any]:
@@ -309,6 +398,7 @@ def _format_dismissal_row(r: Any) -> Dict[str, Any]:
         "requested_by_user_id": int(r["requested_by_user_id"] or 0),
         "requested_by_nome": r["requested_by_nome"] or "",
         "reason": r["reason"] or "",
+        "request_type": str(r["request_type"] or "dismissal"),
         "status": r["status"] or "pending",
         "created_at": r["created_at"] or "",
         "expires_at": r["expires_at"] or "",
@@ -323,15 +413,23 @@ def _get_pending_dismissals_for_user(conn: Any, user_id: int) -> list[Dict[str, 
     rows = conn.execute(
         """
         SELECT id, target_user_id, target_numero_usp, target_nome,
-               requested_by_user_id, requested_by_nome, reason, status,
-               created_at, expires_at, responded_at
+               requested_by_user_id, requested_by_nome, reason,
+               COALESCE(request_type, 'dismissal') AS request_type,
+               status, created_at, expires_at, responded_at
         FROM admin_dismissal_requests
-        WHERE target_user_id = ? AND status = 'pending'
+        WHERE status = 'pending'
         ORDER BY id DESC
-        """,
-        (user_id,),
+        """
     ).fetchall()
-    return [_format_dismissal_row(r) for r in rows]
+    out = []
+    for r in rows:
+        rtype = str(r["request_type"] or "dismissal").strip().lower()
+        tid = int(r["target_user_id"])
+        if rtype == "dismissal" and tid == user_id:
+            out.append(_format_dismissal_row(r))
+        elif rtype in ("resignation", "reactivation") and tid != user_id:
+            out.append(_format_dismissal_row(r))
+    return out
 
 
 def _get_admin_users_payload(conn: Any) -> Dict[str, Any]:
@@ -346,19 +444,29 @@ def _get_admin_users_payload(conn: Any) -> Dict[str, Any]:
     d_rows = conn.execute(
         """
         SELECT id, target_user_id, target_numero_usp, target_nome,
-               requested_by_user_id, requested_by_nome, reason, status,
-               created_at, expires_at, responded_at
+               requested_by_user_id, requested_by_nome, reason,
+               COALESCE(request_type, 'dismissal') AS request_type,
+               status, created_at, expires_at, responded_at
         FROM admin_dismissal_requests
         ORDER BY id DESC
-        LIMIT 50
+        LIMIT 60
         """
     ).fetchall()
     dismissals = [_format_dismissal_row(r) for r in d_rows]
-    pending_by_target: Dict[int, Dict[str, Any]] = {}
+    pending_dismissal_by_target: Dict[int, Dict[str, Any]] = {}
+    pending_resignation_by_target: Dict[int, Dict[str, Any]] = {}
+    pending_reactivation_by_target: Dict[int, Dict[str, Any]] = {}
     for d in dismissals:
+        if d["status"] != "pending":
+            continue
         tid = d["target_user_id"]
-        if d["status"] == "pending" and tid not in pending_by_target:
-            pending_by_target[tid] = d
+        rtype = d["request_type"]
+        if rtype == "dismissal" and tid not in pending_dismissal_by_target:
+            pending_dismissal_by_target[tid] = d
+        elif rtype == "resignation" and tid not in pending_resignation_by_target:
+            pending_resignation_by_target[tid] = d
+        elif rtype == "reactivation" and tid not in pending_reactivation_by_target:
+            pending_reactivation_by_target[tid] = d
     return {
         "items": [
             {
@@ -368,7 +476,9 @@ def _get_admin_users_payload(conn: Any) -> Dict[str, Any]:
                 "is_active": bool(int(r["is_active"] or 0)),
                 "created_at": r["created_at"] or "",
                 "created_by": r["created_by"] or "",
-                "pending_dismissal": pending_by_target.get(int(r["id"])),
+                "pending_dismissal": pending_dismissal_by_target.get(int(r["id"])),
+                "pending_resignation": pending_resignation_by_target.get(int(r["id"])),
+                "pending_reactivation": pending_reactivation_by_target.get(int(r["id"])),
             }
             for r in rows
         ],
@@ -494,11 +604,15 @@ def _create_admin_dismissal_record(
         raise ValueError("Informe o motivo da demissão (mínimo de 5 caracteres).")
 
     existing_pending = conn.execute(
-        "SELECT id FROM admin_dismissal_requests WHERE target_user_id = ? AND status = 'pending'",
+        """
+        SELECT id FROM admin_dismissal_requests
+        WHERE target_user_id = ? AND status = 'pending'
+          AND COALESCE(request_type, 'dismissal') IN ('dismissal', 'resignation')
+        """,
         (target_uid,),
     ).fetchone()
     if existing_pending:
-        raise ValueError("Já existe uma solicitação de demissão pendente para este administrador.")
+        raise ValueError("Já existe uma solicitação de desligamento pendente para este administrador.")
 
     created_dt = datetime.now(timezone.utc)
     created_at = created_dt.isoformat()
@@ -508,8 +622,8 @@ def _create_admin_dismissal_record(
         INSERT INTO admin_dismissal_requests(
             target_user_id, target_numero_usp, target_nome,
             requested_by_user_id, requested_by_nome, reason,
-            status, created_at, expires_at, responded_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, '')
+            request_type, status, created_at, expires_at, responded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'dismissal', 'pending', ?, ?, '')
         """,
         (
             target_uid,
@@ -531,14 +645,180 @@ def _create_admin_dismissal_record(
     row = conn.execute(
         """
         SELECT id, target_user_id, target_numero_usp, target_nome,
-               requested_by_user_id, requested_by_nome, reason, status,
-               created_at, expires_at, responded_at
+               requested_by_user_id, requested_by_nome, reason,
+               COALESCE(request_type, 'dismissal') AS request_type,
+               status, created_at, expires_at, responded_at
         FROM admin_dismissal_requests
         WHERE id = ?
         """,
         (int(cur.lastrowid),),
     ).fetchone()
     return {"ok": True, "dismissal": _format_dismissal_row(row)}
+
+
+def _create_admin_resignation_record(
+    conn: Any,
+    body: Dict[str, Any],
+    requester: Dict[str, Any],
+) -> Dict[str, Any]:
+    _expire_overdue_dismissals(conn)
+    req_uid = int(requester.get("uid") or 0)
+    if req_uid <= 0:
+        raise ValueError("Sessão administrativa não identificada.")
+    target = conn.execute(
+        "SELECT id, numero_usp, nome, is_active FROM admin_users WHERE id = ?",
+        (req_uid,),
+    ).fetchone()
+    if not target or not int(target["is_active"] or 0):
+        raise ValueError("Conta administrativa não está ativa.")
+
+    other_cnt = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM admin_users WHERE is_active = 1 AND id != ?",
+        (req_uid,),
+    ).fetchone()
+    if int((other_cnt["cnt"] if other_cnt else 0) or 0) == 0:
+        raise ValueError("Cadastre outro administrador ativo antes de pedir demissão.")
+
+    existing_pending = conn.execute(
+        """
+        SELECT id FROM admin_dismissal_requests
+        WHERE target_user_id = ? AND status = 'pending'
+          AND COALESCE(request_type, 'dismissal') IN ('dismissal', 'resignation')
+        """,
+        (req_uid,),
+    ).fetchone()
+    if existing_pending:
+        raise ValueError("Já existe uma solicitação de desligamento pendente para sua conta.")
+
+    reason = " ".join(str(body.get("reason") or "").split()) or "Pedido voluntário de demissão"
+    created_dt = datetime.now(timezone.utc)
+    created_at = created_dt.isoformat()
+    expires_at = (created_dt + timedelta(days=7)).isoformat()
+    cur = conn.execute(
+        """
+        INSERT INTO admin_dismissal_requests(
+            target_user_id, target_numero_usp, target_nome,
+            requested_by_user_id, requested_by_nome, reason,
+            request_type, status, created_at, expires_at, responded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'resignation', 'pending', ?, ?, '')
+        """,
+        (
+            req_uid,
+            target["numero_usp"],
+            target["nome"],
+            req_uid,
+            target["nome"],
+            reason,
+            created_at,
+            expires_at,
+        ),
+    )
+    _log_audit(
+        conn,
+        "REQUEST_ADMIN_RESIGNATION",
+        f"NUSP {target['numero_usp']}",
+        f"{target['nome']} pediu demissão (prazo de 7 dias p/ aprovação) — Motivo: {reason}",
+    )
+    row = conn.execute(
+        """
+        SELECT id, target_user_id, target_numero_usp, target_nome,
+               requested_by_user_id, requested_by_nome, reason,
+               COALESCE(request_type, 'dismissal') AS request_type,
+               status, created_at, expires_at, responded_at
+        FROM admin_dismissal_requests
+        WHERE id = ?
+        """,
+        (int(cur.lastrowid),),
+    ).fetchone()
+    return {"ok": True, "dismissal": _format_dismissal_row(row)}
+
+
+def _perform_admin_return_request(conn: Any, body: Dict[str, Any]) -> Dict[str, Any]:
+    _expire_overdue_dismissals(conn)
+    pw = str(body.get("password") or "")
+    if not verify_admin_login(conn, pw):
+        raise PermissionError("Número USP não autorizado ou senha incorreta.")
+    nusp = normalize_nusp(body.get("numero_usp"))
+    if len(nusp) < 4 or len(nusp) > 15:
+        raise ValueError("Informe um Número USP válido (4 a 15 dígitos).")
+
+    user_row = conn.execute(
+        "SELECT id, numero_usp, nome, is_active FROM admin_users WHERE numero_usp = ?",
+        (nusp,),
+    ).fetchone()
+    if user_row is None:
+        raise PermissionError("Este Número USP não está cadastrado no sistema.")
+    if int(user_row["is_active"] or 0):
+        raise ValueError("Sua conta administrativa já está ativa. Faça o login normalmente.")
+
+    reason = " ".join(str(body.get("reason") or "").split())
+    if len(reason) < 5:
+        raise ValueError("Informe o motivo para retornar (mínimo de 5 caracteres).")
+
+    uid = int(user_row["id"])
+    now = _now_iso()
+    actor_label = f"{user_row['nome']} ({user_row['numero_usp']})"
+    existing = conn.execute(
+        """
+        SELECT id FROM admin_dismissal_requests
+        WHERE target_user_id = ?
+          AND COALESCE(request_type, 'dismissal') = 'reactivation'
+          AND status = 'pending'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (uid,),
+    ).fetchone()
+    if existing:
+        req_id = int(existing["id"])
+        conn.execute(
+            "UPDATE admin_dismissal_requests SET reason = ?, created_at = ? WHERE id = ?",
+            (reason, now, req_id),
+        )
+    else:
+        cur = conn.execute(
+            """
+            INSERT INTO admin_dismissal_requests(
+                target_user_id, target_numero_usp, target_nome,
+                requested_by_user_id, requested_by_nome, reason,
+                request_type, status, created_at, expires_at, responded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'reactivation', 'pending', ?, '', '')
+            """,
+            (
+                uid,
+                user_row["numero_usp"],
+                user_row["nome"],
+                uid,
+                user_row["nome"],
+                reason,
+                now,
+            ),
+        )
+        req_id = int(cur.lastrowid)
+
+    _log_audit(
+        conn,
+        "REQUEST_ADMIN_RETURN",
+        f"NUSP {user_row['numero_usp']}",
+        f"{user_row['nome']} solicitou retorno — Motivo: {reason}",
+        actor=actor_label,
+    )
+    row = conn.execute(
+        """
+        SELECT id, target_user_id, target_numero_usp, target_nome,
+               requested_by_user_id, requested_by_nome, reason,
+               COALESCE(request_type, 'dismissal') AS request_type,
+               status, created_at, expires_at, responded_at
+        FROM admin_dismissal_requests
+        WHERE id = ?
+        """,
+        (req_id,),
+    ).fetchone()
+    return {
+        "ok": True,
+        "request": _format_dismissal_row(row),
+        "message": "Solicitação de retorno enviada. Aguarde a aprovação de um administrador ativo.",
+    }
 
 
 def _respond_admin_dismissal_record(
@@ -551,17 +831,25 @@ def _respond_admin_dismissal_record(
     row = conn.execute(
         """
         SELECT id, target_user_id, target_numero_usp, target_nome,
-               requested_by_user_id, requested_by_nome, reason, status,
-               created_at, expires_at, responded_at
+               requested_by_user_id, requested_by_nome, reason,
+               COALESCE(request_type, 'dismissal') AS request_type,
+               status, created_at, expires_at, responded_at
         FROM admin_dismissal_requests
         WHERE id = ?
         """,
         (dismissal_id,),
     ).fetchone()
     if not row:
-        raise LookupError("Solicitação de demissão não encontrada.")
-    if current_uid <= 0 or int(row["target_user_id"]) != current_uid:
+        raise LookupError("Solicitação não encontrada.")
+
+    rtype = str(row["request_type"] or "dismissal").strip().lower()
+    target_uid = int(row["target_user_id"])
+    if current_uid <= 0:
+        raise PermissionError("Sessão administrativa inválida.")
+    if rtype == "dismissal" and target_uid != current_uid:
         raise PermissionError("Apenas o administrador destinatário pode aceitar ou recusar esta demissão.")
+    if rtype in ("resignation", "reactivation") and target_uid == current_uid:
+        raise PermissionError("Outro administrador ativo precisa aprovar ou recusar esta solicitação.")
     if row["status"] != "pending":
         raise ValueError(f"Esta solicitação já foi encerrada ({row['status']}).")
 
@@ -570,10 +858,36 @@ def _respond_admin_dismissal_record(
         raise ValueError("Decisão inválida: informe 'accept' ou 'reject'.")
 
     now = _now_iso()
+    if rtype == "reactivation":
+        if decision == "accept":
+            conn.execute(
+                "UPDATE admin_dismissal_requests SET status = 'accepted', responded_at = ? WHERE id = ?",
+                (now, dismissal_id),
+            )
+            conn.execute("UPDATE admin_users SET is_active = 1 WHERE id = ?", (target_uid,))
+            _log_audit(
+                conn,
+                "APPROVE_ADMIN_RETURN",
+                f"NUSP {row['target_numero_usp']}",
+                f"Retorno aprovado para {row['target_nome']} — Motivo: {row['reason']}",
+            )
+            return {"ok": True, "status": "accepted", "logged_out": False, "request_type": rtype}
+        conn.execute(
+            "UPDATE admin_dismissal_requests SET status = 'rejected', responded_at = ? WHERE id = ?",
+            (now, dismissal_id),
+        )
+        _log_audit(
+            conn,
+            "REJECT_ADMIN_RETURN",
+            f"NUSP {row['target_numero_usp']}",
+            f"Retorno recusado para {row['target_nome']}",
+        )
+        return {"ok": True, "status": "rejected", "logged_out": False, "request_type": rtype}
+
     if decision == "accept":
         other_cnt = conn.execute(
             "SELECT COUNT(*) AS cnt FROM admin_users WHERE is_active = 1 AND id != ?",
-            (current_uid,),
+            (target_uid,),
         ).fetchone()
         if int((other_cnt["cnt"] if other_cnt else 0) or 0) == 0:
             raise ValueError("Não há outro administrador ativo para manter o acesso ao sistema.")
@@ -581,30 +895,37 @@ def _respond_admin_dismissal_record(
             "UPDATE admin_dismissal_requests SET status = 'accepted', responded_at = ? WHERE id = ?",
             (now, dismissal_id),
         )
-        conn.execute("UPDATE admin_users SET is_active = 0 WHERE id = ?", (current_uid,))
+        conn.execute("UPDATE admin_users SET is_active = 0 WHERE id = ?", (target_uid,))
         conn.execute(
             "UPDATE admin_sessions SET logged_out_at = ? WHERE user_id = ? AND (logged_out_at IS NULL OR logged_out_at = '')",
-            (now, current_uid),
+            (now, target_uid),
         )
-        _log_audit(
-            conn,
-            "ACCEPT_ADMIN_DISMISSAL",
-            f"NUSP {row['target_numero_usp']}",
-            f"Aceita por {row['target_nome']} — Motivo: {row['reason']}",
+        action_name = "ACCEPT_ADMIN_DISMISSAL" if rtype == "dismissal" else "APPROVE_ADMIN_RESIGNATION"
+        detail_msg = (
+            f"Aceita por {row['target_nome']} — Motivo: {row['reason']}"
+            if rtype == "dismissal"
+            else f"Pedido de demissão de {row['target_nome']} aprovado — Motivo: {row['reason']}"
         )
-        return {"ok": True, "status": "accepted", "logged_out": True}
+        _log_audit(conn, action_name, f"NUSP {row['target_numero_usp']}", detail_msg)
+        return {
+            "ok": True,
+            "status": "accepted",
+            "logged_out": current_uid == target_uid,
+            "request_type": rtype,
+        }
 
     conn.execute(
         "UPDATE admin_dismissal_requests SET status = 'rejected', responded_at = ? WHERE id = ?",
         (now, dismissal_id),
     )
-    _log_audit(
-        conn,
-        "REJECT_ADMIN_DISMISSAL",
-        f"NUSP {row['target_numero_usp']}",
-        f"Recusada por {row['target_nome']}",
+    action_rej = "REJECT_ADMIN_DISMISSAL" if rtype == "dismissal" else "REJECT_ADMIN_RESIGNATION"
+    detail_rej = (
+        f"Recusada por {row['target_nome']}"
+        if rtype == "dismissal"
+        else f"Pedido de demissão de {row['target_nome']} recusado"
     )
-    return {"ok": True, "status": "rejected", "logged_out": False}
+    _log_audit(conn, action_rej, f"NUSP {row['target_numero_usp']}", detail_rej)
+    return {"ok": True, "status": "rejected", "logged_out": False, "request_type": rtype}
 
 
 def _to_opt_float(val: Any) -> Optional[float]:
@@ -1041,46 +1362,60 @@ def _admin_pc_status_rank(pc: Dict[str, Any]) -> Tuple[int, int]:
 
 
 def _update_rules(conn: Any, body: Dict[str, Any]) -> None:
-    """Atualiza pesos das notas, regras gerais, faixas de RAM e prioridades por categoria."""
-    pesos = body.get("pesos")
-    if not isinstance(pesos, dict):
-        raise ValueError("Campo 'pesos' inválido.")
-    w_keys = {
-        "cpu": ("peso_cpu", "Peso CPU", "pesos"),
-        "ram": ("peso_ram", "Peso RAM", "pesos"),
-        "armazenamento": ("peso_armazenamento", "Peso Armazenamento", "pesos"),
-        "gpu": ("peso_gpu", "Peso GPU", "pesos"),
-    }
+    """Atualiza faixas de RAM e prioridades por categoria (e pesos/regras quando informados)."""
+    has_weights = "pesos" in body
     parsed_weights: Dict[str, float] = {}
-    for k, (db_key, _, _) in w_keys.items():
+    diff_min = 3.0
+    peso_hd = 0.25
+    escala_log = 60.0
+
+    if has_weights:
+        pesos = body.get("pesos")
+        if not isinstance(pesos, dict):
+            raise ValueError("Campo 'pesos' inválido.")
+        w_keys = {
+            "cpu": ("peso_cpu", "Peso CPU", "pesos"),
+            "ram": ("peso_ram", "Peso RAM", "pesos"),
+            "armazenamento": ("peso_armazenamento", "Peso Armazenamento", "pesos"),
+            "gpu": ("peso_gpu", "Peso GPU", "pesos"),
+        }
+        for k, (db_key, _, _) in w_keys.items():
+            try:
+                v = float(pesos[k])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"Peso '{k}' inválido.") from exc
+            if v < 0.0 or v > 1.0:
+                raise ValueError(f"Peso '{k}' deve estar entre 0% e 100%.")
+            parsed_weights[db_key] = round(v, 6)
+
+        weight_sum = sum(parsed_weights.values())
+        if abs(weight_sum - 1.0) > 0.002:
+            raise ValueError(f"A soma dos 4 pesos deve ser 100% (atual: {weight_sum * 100:.1f}%).")
+
         try:
-            v = float(pesos[k])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(f"Peso '{k}' inválido.") from exc
-        if v < 0.0 or v > 1.0:
-            raise ValueError(f"Peso '{k}' deve estar entre 0% e 100%.")
-        parsed_weights[db_key] = round(v, 6)
+            diff_min = float(body.get("diferenca_minima_upgrade", 3.0))
+            peso_hd = float(body.get("armaz_peso_hd", 0.25))
+            escala_log = float(body.get("armaz_escala_log", 60.0))
+            score_max = float(body.get("score_maximo", 10.0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Parâmetros numéricos inválidos.") from exc
 
-    weight_sum = sum(parsed_weights.values())
-    if abs(weight_sum - 1.0) > 0.002:
-        raise ValueError(f"A soma dos 4 pesos deve ser 100% (atual: {weight_sum * 100:.1f}%).")
-
-    try:
-        diff_min = float(body.get("diferenca_minima_upgrade", 3.0))
-        peso_hd = float(body.get("armaz_peso_hd", 0.25))
-        escala_log = float(body.get("armaz_escala_log", 60.0))
-        score_max = float(body.get("score_maximo", 10.0))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Parâmetros numéricos inválidos.") from exc
-
-    if diff_min < 0:
-        raise ValueError("Diferença mínima para upgrade deve ser maior ou igual a zero.")
-    if peso_hd < 0 or peso_hd > 2.0:
-        raise ValueError("Peso relativo do HD deve estar entre 0 e 2.")
-    if escala_log <= 0:
-        raise ValueError("Fator de suavização log deve ser maior que zero.")
-    if score_max <= 0 or score_max > 100:
-        raise ValueError("Score máximo componente deve ser maior que zero (até 100).")
+        if diff_min < 0:
+            raise ValueError("Diferença mínima para upgrade deve ser maior ou igual a zero.")
+        if peso_hd < 0 or peso_hd > 2.0:
+            raise ValueError("Peso relativo do HD deve estar entre 0 e 2.")
+        if escala_log <= 0:
+            raise ValueError("Fator de suavização log deve ser maior que zero.")
+        if score_max <= 0 or score_max > 100:
+            raise ValueError("Score máximo componente deve ser maior que zero (até 100).")
+    else:
+        sm_row = conn.execute("SELECT `value` FROM system_params WHERE `key` = 'score_maximo'").fetchone()
+        try:
+            score_max = float(sm_row["value"]) if sm_row else 10.0
+        except (TypeError, ValueError):
+            score_max = 10.0
+        if score_max <= 0 or score_max > 100:
+            score_max = 10.0
 
     raw_ram = body.get("ram_thresholds")
     if not isinstance(raw_ram, list) or not raw_ram:
@@ -1132,25 +1467,32 @@ def _update_rules(conn: Any, body: Dict[str, Any]) -> None:
         prec_pc = 1 if cat.get("precisa_pc") else 0
         cat_entries.append((grp, part_up, prec_pc, name))
 
-    param_rows = [
-        *[
-            (db_key, lbl, f"{parsed_weights[db_key]:g}", cat)
-            for db_key, lbl, cat in w_keys.values()
-        ],
-        ("diferenca_minima_upgrade", "Diferença mínima para upgrade", f"{diff_min:g}", "regras"),
-        ("armaz_peso_hd", "Peso relativo do HD (Armazenamento)", f"{peso_hd:g}", "armazenamento"),
-        ("armaz_escala_log", "Fator de suavização log (GB_eq)", f"{escala_log:g}", "armazenamento"),
-        ("score_maximo", "Score máximo componente", f"{score_max:g}", "armazenamento"),
-    ]
-    for key, lbl, val, cat in param_rows:
-        conn.execute(
-            """
-            INSERT INTO system_params(`key`, label, `value`, category)
-            VALUES (?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)
-            """,
-            (key, lbl, val, cat),
-        )
+    if has_weights:
+        w_keys = {
+            "cpu": ("peso_cpu", "Peso CPU", "pesos"),
+            "ram": ("peso_ram", "Peso RAM", "pesos"),
+            "armazenamento": ("peso_armazenamento", "Peso Armazenamento", "pesos"),
+            "gpu": ("peso_gpu", "Peso GPU", "pesos"),
+        }
+        param_rows = [
+            *[
+                (db_key, lbl, f"{parsed_weights[db_key]:g}", cat)
+                for db_key, lbl, cat in w_keys.values()
+            ],
+            ("diferenca_minima_upgrade", "Diferença mínima para upgrade", f"{diff_min:g}", "regras"),
+            ("armaz_peso_hd", "Peso relativo do HD (Armazenamento)", f"{peso_hd:g}", "armazenamento"),
+            ("armaz_escala_log", "Fator de suavização log (GB_eq)", f"{escala_log:g}", "armazenamento"),
+            ("score_maximo", "Score máximo componente", f"{score_max:g}", "armazenamento"),
+        ]
+        for key, lbl, val, cat in param_rows:
+            conn.execute(
+                """
+                INSERT INTO system_params(`key`, label, `value`, category)
+                VALUES (?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)
+                """,
+                (key, lbl, val, cat),
+            )
 
     conn.execute("DELETE FROM score_thresholds WHERE metric = 'ram'")
     conn.executemany(
@@ -1161,16 +1503,74 @@ def _update_rules(conn: Any, body: Dict[str, Any]) -> None:
         "UPDATE categories SET priority_group = ?, participa_upgrade = ?, precisa_pc = ? WHERE name = ?",
         cat_entries,
     )
-    _log_audit(
-        conn,
-        "UPDATE_CRITERIA",
-        "rules",
+    audit_detail = (
         (
             f"Pesos CPU={parsed_weights['peso_cpu']*100:.1f}% RAM={parsed_weights['peso_ram']*100:.1f}% "
             f"Arm={parsed_weights['peso_armazenamento']*100:.1f}% GPU={parsed_weights['peso_gpu']*100:.1f}%; "
             f"{len(ram_entries)} faixas RAM; {len(cat_entries)} categorias"
-        ),
+        )
+        if has_weights
+        else f"{len(ram_entries)} faixas RAM; {len(cat_entries)} categorias"
     )
+    _log_audit(conn, "UPDATE_CRITERIA", "rules", audit_detail)
+
+
+def _update_system_params(conn: Any, updates: Dict[str, Any]) -> None:
+    """Atualiza parâmetros numéricos e privacidade com validação consistente."""
+    if not isinstance(updates, dict) or not updates:
+        raise ValueError("Campo 'params' deve ser um objeto chave-valor não vazio.")
+
+    current_rows = conn.execute("SELECT `key`, `value` FROM system_params").fetchall()
+    current = {r["key"]: r["value"] for r in current_rows}
+    weight_keys = ("peso_cpu", "peso_ram", "peso_armazenamento", "peso_gpu")
+    normalized_updates: Dict[str, str] = {}
+
+    if any(k in updates for k in weight_keys):
+        w_vals: Dict[str, float] = {}
+        for k in weight_keys:
+            raw_v = updates.get(k, current.get(k, "0"))
+            try:
+                v = float(str(raw_v).replace(",", "."))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Valor inválido para '{k}'.") from exc
+            if v < 0.0 or v > 1.0:
+                raise ValueError(f"O peso '{k}' deve estar entre 0% e 100%.")
+            w_vals[k] = round(v, 6)
+            if k in updates:
+                normalized_updates[k] = f"{w_vals[k]:g}"
+        w_sum = sum(w_vals.values())
+        if abs(w_sum - 1.0) > 0.002:
+            raise ValueError(f"A soma dos 4 pesos deve ser 100% (atual: {w_sum * 100:.1f}%).")
+
+    numeric_bounds = {
+        "diferenca_minima_upgrade": (0.0, 100.0, True, "Diferença mínima para upgrade"),
+        "armaz_peso_hd": (0.0, 2.0, True, "Peso relativo do HD"),
+        "armaz_escala_log": (0.0, 10000.0, False, "Fator de suavização log"),
+        "score_maximo": (0.0, 100.0, False, "Score máximo componente"),
+    }
+    for k, val in updates.items():
+        if k in weight_keys:
+            continue
+        sval = str(val).strip()
+        if k in numeric_bounds:
+            lo, hi, allow_lo, label = numeric_bounds[k]
+            try:
+                nv = float(sval.replace(",", "."))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Valor numérico inválido para {label}.") from exc
+            if (nv < lo if allow_lo else nv <= lo) or nv > hi:
+                raise ValueError(f"{label} fora do intervalo permitido.")
+            normalized_updates[k] = f"{round(nv, 6):g}"
+        elif k == "public_anonymize_names":
+            if sval not in ("Sim", "Não"):
+                raise ValueError("Valor inválido para anonimização pública.")
+            normalized_updates[k] = sval
+        else:
+            normalized_updates[k] = sval
+
+    for k, v in normalized_updates.items():
+        conn.execute("UPDATE system_params SET `value` = ? WHERE `key` = ?", (v, k))
+    _log_audit(conn, "UPDATE_PARAMS", "system_params", f"Chaves atualizadas: {list(normalized_updates.keys())}")
 
 
 def _handle_network_import_xlsx(conn: Any, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -1571,6 +1971,13 @@ class LSEEController:
                 with db_session() as conn:
                     status, payload, token = _perform_admin_login(conn, body)
                 self._send_json(payload, status=status, cookie_token=token)
+                return self._response  # type: ignore[return-value]
+
+            if path == "/api/auth/request-return":
+                body = self._read_json_body()
+                with db_session() as conn:
+                    res = _perform_admin_return_request(conn, body)
+                self._send_json(res, status=HTTPStatus.CREATED)
                 return self._response  # type: ignore[return-value]
 
             if path == "/api/auth/logout":
@@ -2389,6 +2796,15 @@ class LSEEController:
                 self._send_json(res, status=HTTPStatus.CREATED)
                 return
 
+            if path == "/api/admin/resignations":
+                res = _create_admin_resignation_record(
+                    conn,
+                    body,
+                    getattr(self, "_admin_user", None) or {},
+                )
+                self._send_json(res, status=HTTPStatus.CREATED)
+                return
+
             if path.startswith("/api/admin/dismissals/") and path.endswith("/respond"):
                 dismissal_id = int(path.split("/")[4])
                 current_uid = int((getattr(self, "_admin_user", None) or {}).get("uid") or 0)
@@ -2526,6 +2942,25 @@ class LSEEController:
                 self._send_json({"ok": True})
                 return
 
+            if path.startswith("/api/admin/allocations/"):
+                aloc_pk = int(path.split("/")[4])
+                al = conn.execute(
+                    "SELECT id, id_alocacao, pessoa_nome, pc_id_pc FROM allocations WHERE id = ?",
+                    (aloc_pk,),
+                ).fetchone()
+                if not al:
+                    raise LookupError("Alocação não encontrada.")
+                obs = (body.get("observacoes") or "").strip()
+                conn.execute("UPDATE allocations SET observacoes = ? WHERE id = ?", (obs, aloc_pk))
+                _log_audit(
+                    conn,
+                    "UPDATE_ALLOCATION_OBS",
+                    al["id_alocacao"],
+                    f"{al['pessoa_nome']} ({al['pc_id_pc']}) · Obs={obs or '(vazia)'}",
+                )
+                self._send_json({"ok": True, "observacoes": obs})
+                return
+
             if path.startswith("/api/admin/monitors/"):
                 m_pk = int(path.split("/")[4])
                 conn.execute(
@@ -2644,12 +3079,7 @@ class LSEEController:
                 return
 
             if path == "/api/admin/params":
-                updates = body.get("params") or {}
-                if not isinstance(updates, dict):
-                    raise ValueError("Campo 'params' deve ser um objeto chave-valor.")
-                for k, v in updates.items():
-                    conn.execute("UPDATE system_params SET `value` = ? WHERE `key` = ?", (str(v).strip(), str(k)))
-                _log_audit(conn, "UPDATE_PARAMS", "system_params", f"Chaves atualizadas: {list(updates.keys())}")
+                _update_system_params(conn, body.get("params") or {})
                 self._send_json({"ok": True})
                 return
 
