@@ -14,6 +14,30 @@ from .config import get_db_config
 _SCHEMA_LOCK = threading.Lock()
 _SCHEMA_READY = False
 
+EXPECTED_TABLES = frozenset(
+    {
+        "admin_config",
+        "system_params",
+        "score_thresholds",
+        "categories",
+        "processors",
+        "computers",
+        "people",
+        "allocations",
+        "monitors",
+        "network_devices",
+        "upgrade_decisions",
+        "map_stations",
+        "site_contents",
+        "material_requests",
+        "admin_users",
+        "admin_sessions",
+        "admin_chat_messages",
+        "admin_dismissal_requests",
+        "audit_log",
+    }
+)
+
 
 class RowDict(dict):
     """Dicionário compatível com acesso por nome de coluna e por índice inteiro."""
@@ -366,9 +390,9 @@ def get_connection() -> MySQLConnectionWrapper:
 @contextmanager
 def db_session() -> Iterator[MySQLConnectionWrapper]:
     """Gerenciador de contexto transacional para operações no MySQL."""
-    ensure_schema_initialized()
     conn = get_connection()
     try:
+        ensure_schema_initialized(conn)
         yield conn
         conn.commit()
     except Exception:
@@ -492,29 +516,46 @@ def ensure_schema_columns(conn: MySQLConnectionWrapper) -> None:
         )
 
 
-def init_schema() -> None:
+def init_schema(conn: Optional[MySQLConnectionWrapper] = None) -> None:
     """Cria as tabelas no MySQL caso ainda não existam e garante parâmetros padrão."""
     global _SCHEMA_READY
-    conn = get_connection()
+    owns_conn = conn is None
+    target = conn if conn is not None else get_connection()
     try:
         for stmt in SCHEMA_STATEMENTS:
-            conn.execute(stmt)
-        ensure_schema_columns(conn)
-        ensure_default_params(conn)
-        conn.commit()
+            target.execute(stmt)
+        ensure_schema_columns(target)
+        ensure_default_params(target)
+        target.commit()
         _SCHEMA_READY = True
     except Exception:
-        conn.rollback()
+        if owns_conn:
+            target.rollback()
         raise
     finally:
-        conn.close()
+        if owns_conn:
+            target.close()
 
 
-def ensure_schema_initialized() -> None:
-    """Garante que o schema foi inicializado uma vez por processo."""
+def ensure_schema_initialized(conn: Optional[MySQLConnectionWrapper] = None) -> None:
+    """Garante em cold start que todas as tabelas existem com apenas 1 consulta leve."""
     global _SCHEMA_READY
     if _SCHEMA_READY:
         return
     with _SCHEMA_LOCK:
-        if not _SCHEMA_READY:
-            init_schema()
+        if _SCHEMA_READY:
+            return
+        owns_conn = conn is None
+        target = conn if conn is not None else get_connection()
+        try:
+            rows = target.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()"
+            ).fetchall()
+            existing = {str(r[0]).lower() for r in rows}
+            if EXPECTED_TABLES.issubset(existing):
+                _SCHEMA_READY = True
+                return
+            init_schema(target)
+        finally:
+            if owns_conn:
+                target.close()

@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import base64
 import contextvars
+import hashlib
 import json
 import mimetypes
+import os
+import re
 import secrets
+import threading
+import time
+import traceback
 import webbrowser
 from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
@@ -59,6 +65,60 @@ def _public_person_label(nome: str, id_pessoa: str, anonymize: bool) -> str:
 
 _CURRENT_ADMIN_ACTOR: contextvars.ContextVar[str] = contextvars.ContextVar("_CURRENT_ADMIN_ACTOR", default="")
 ONLINE_SESSION_TTL_SECONDS = 75
+SERVER_CACHE_TTL_SECONDS = 60.0
+_SERVER_CACHE_LOCK = threading.Lock()
+_SERVER_CACHE: Dict[str, Tuple[float, Any]] = {}
+_DISMISSAL_CHECK_LOCK = threading.Lock()
+_LAST_DISMISSAL_CHECK_TS = 0.0
+
+
+class _RateLimitError(Exception):
+    """Exceção lançada quando o limite de tentativas de autenticação é excedido."""
+
+
+def _server_cache_get(key: str) -> Optional[Any]:
+    now = time.monotonic()
+    with _SERVER_CACHE_LOCK:
+        entry = _SERVER_CACHE.get(key)
+        if not entry:
+            return None
+        expires_at, val = entry
+        if now >= expires_at:
+            _SERVER_CACHE.pop(key, None)
+            return None
+        return val
+
+
+def _server_cache_set(key: str, value: Any, ttl: float = SERVER_CACHE_TTL_SECONDS) -> None:
+    with _SERVER_CACHE_LOCK:
+        _SERVER_CACHE[key] = (time.monotonic() + ttl, value)
+
+
+def _server_cache_clear() -> None:
+    with _SERVER_CACHE_LOCK:
+        _SERVER_CACHE.clear()
+
+
+def _client_ip_hash() -> str:
+    fwd = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    raw_ip = fwd or (request.remote_addr or "local")
+    return hashlib.sha256(raw_ip.encode("utf-8")).hexdigest()[:16]
+
+
+def _enforce_auth_rate_limit(conn: Any, ip_hash: str) -> None:
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM audit_log
+        WHERE action IN ('ADMIN_LOGIN_FAILED', 'ADMIN_LOGIN_INACTIVE')
+          AND timestamp >= ?
+          AND details LIKE ?
+        """,
+        (cutoff, f"%[ip:{ip_hash}]%"),
+    ).fetchone()
+    if int((row["cnt"] if row else 0) or 0) >= 8:
+        raise _RateLimitError("Muitas tentativas seguidas. Aguarde 5 minutos antes de tentar novamente.")
 ALLOWED_ADMIN_TABS = {
     "dashboard",
     "computadores",
@@ -105,10 +165,9 @@ def _resolve_session_claims(conn: Any, claims: Optional[Dict[str, Any]]) -> Opti
     if not claims:
         return None
     uid = int(claims.get("uid") or 0)
-    sid = str(claims.get("sid") or "")
-    if uid <= 0:
-        nome = str(claims.get("nome") or "Administrador")
-        return {"uid": 0, "nusp": "", "nome": nome, "sid": sid, "actor_label": nome}
+    sid = str(claims.get("sid") or "").strip()
+    if uid <= 0 or not sid:
+        return None
 
     _expire_overdue_dismissals(conn)
     user_row = conn.execute(
@@ -117,13 +176,12 @@ def _resolve_session_claims(conn: Any, claims: Optional[Dict[str, Any]]) -> Opti
     ).fetchone()
     if not user_row or not int(user_row["is_active"] or 0):
         return None
-    if sid:
-        sess_row = conn.execute(
-            "SELECT logged_out_at FROM admin_sessions WHERE session_id = ?",
-            (sid,),
-        ).fetchone()
-        if sess_row and (sess_row["logged_out_at"] or "").strip():
-            return None
+    sess_row = conn.execute(
+        "SELECT logged_out_at FROM admin_sessions WHERE session_id = ? AND user_id = ?",
+        (sid, uid),
+    ).fetchone()
+    if not sess_row or (sess_row["logged_out_at"] or "").strip():
+        return None
     nusp = str(user_row["numero_usp"] or "")
     nome = str(user_row["nome"] or "")
     return {
@@ -161,7 +219,11 @@ def _touch_admin_session(conn: Any, admin_info: Dict[str, Any], active_tab: str 
         )
 
 
-def _perform_admin_login(conn: Any, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any], Optional[str]]:
+def _perform_admin_login(
+    conn: Any,
+    body: Dict[str, Any],
+    ip_hash: str = "",
+) -> Tuple[int, Dict[str, Any], Optional[str]]:
     _expire_overdue_dismissals(conn)
     nusp_raw = body.get("numero_usp", "")
     bootstrap_name = str(body.get("nome") or "").strip()
@@ -170,6 +232,7 @@ def _perform_admin_login(conn: Any, body: Dict[str, Any]) -> Tuple[int, Dict[str
     if active_tab not in ALLOWED_ADMIN_TABS:
         active_tab = "dashboard"
 
+    ip_tag = f" [ip:{ip_hash}]" if ip_hash else ""
     user, err_msg, code = authenticate_admin_user(conn, nusp_raw, pw, bootstrap_name)
     if not user:
         clean_nusp = normalize_nusp(nusp_raw)
@@ -199,7 +262,7 @@ def _perform_admin_login(conn: Any, body: Dict[str, Any]) -> Tuple[int, Dict[str
                 conn,
                 "ADMIN_LOGIN_INACTIVE",
                 f"NUSP {clean_nusp}",
-                "Tentativa de login com conta administrativa desativada",
+                f"Tentativa de login com conta administrativa desativada{ip_tag}",
                 actor=f"{inactive_u['nome']} ({clean_nusp})" if inactive_u else clean_nusp,
             )
             return (
@@ -215,7 +278,7 @@ def _perform_admin_login(conn: Any, body: Dict[str, Any]) -> Tuple[int, Dict[str
                 None,
             )
         actor = clean_nusp or "Não identificado"
-        _log_audit(conn, "ADMIN_LOGIN_FAILED", clean_nusp or "auth", f"{code}: {err_msg}", actor=actor)
+        _log_audit(conn, "ADMIN_LOGIN_FAILED", clean_nusp or "auth", f"{code}: {err_msg}{ip_tag}", actor=actor)
         return (
             HTTPStatus.UNAUTHORIZED,
             {"error": err_msg, "needs_bootstrap": _needs_admin_bootstrap(conn), "code": code},
@@ -235,10 +298,11 @@ def _perform_admin_login(conn: Any, body: Dict[str, Any]) -> Tuple[int, Dict[str
     actor_label = f"{user['nome']} ({user['numero_usp']})"
     login_note = "1º administrador cadastrado no bootstrap" if code == "BOOTSTRAP_OK" else "Sessão administrativa iniciada"
     _log_audit(conn, "ADMIN_LOGIN", f"NUSP {user['numero_usp']}", login_note, actor=actor_label)
-    token = create_session_token(
-        {"uid": int(user["id"]), "nusp": user["numero_usp"], "nome": user["nome"], "sid": sid}
-    )
+    admin_info = {"uid": int(user["id"]), "nusp": user["numero_usp"], "nome": user["nome"], "sid": sid}
+    token = create_session_token(admin_info)
     pending_dismissals = _get_pending_dismissals_for_user(conn, int(user["id"]))
+    collab_payload = _get_collab_payload(conn, admin_info)
+    responsibles = _get_public_responsibles(conn)
     return (
         HTTPStatus.OK,
         {
@@ -251,6 +315,8 @@ def _perform_admin_login(conn: Any, body: Dict[str, Any]) -> Tuple[int, Dict[str
                 "session_id": sid,
             },
             "pending_dismissals": pending_dismissals,
+            "collab": collab_payload,
+            "responsibles": responsibles,
         },
         token,
     )
@@ -338,7 +404,16 @@ def _get_collab_payload(conn: Any, admin_info: Dict[str, Any]) -> Dict[str, Any]
     }
 
 
-def _expire_overdue_dismissals(conn: Any) -> None:
+def _expire_overdue_dismissals(conn: Any, force: bool = False) -> None:
+    global _LAST_DISMISSAL_CHECK_TS
+    now_mono = time.monotonic()
+    if not force and (now_mono - _LAST_DISMISSAL_CHECK_TS) < 60.0:
+        return
+    with _DISMISSAL_CHECK_LOCK:
+        now_mono = time.monotonic()
+        if not force and (now_mono - _LAST_DISMISSAL_CHECK_TS) < 60.0:
+            return
+        _LAST_DISMISSAL_CHECK_TS = now_mono
     now = _now_iso()
     overdue = conn.execute(
         """
@@ -440,7 +515,7 @@ def _get_pending_dismissals_for_user(conn: Any, user_id: int) -> list[Dict[str, 
 
 
 def _get_admin_users_payload(conn: Any) -> Dict[str, Any]:
-    _expire_overdue_dismissals(conn)
+    _expire_overdue_dismissals(conn, force=True)
     rows = conn.execute(
         """
         SELECT id, numero_usp, nome, is_active, created_at, created_by
@@ -591,7 +666,7 @@ def _create_admin_dismissal_record(
     body: Dict[str, Any],
     requester: Dict[str, Any],
 ) -> Dict[str, Any]:
-    _expire_overdue_dismissals(conn)
+    _expire_overdue_dismissals(conn, force=True)
     req_uid = int(requester.get("uid") or 0)
     req_nome = str(requester.get("nome") or requester.get("actor_label") or "Administrador")
     if req_uid > 0 and target_uid == req_uid:
@@ -668,7 +743,7 @@ def _create_admin_resignation_record(
     body: Dict[str, Any],
     requester: Dict[str, Any],
 ) -> Dict[str, Any]:
-    _expire_overdue_dismissals(conn)
+    _expire_overdue_dismissals(conn, force=True)
     req_uid = int(requester.get("uid") or 0)
     if req_uid <= 0:
         raise ValueError("Sessão administrativa não identificada.")
@@ -740,12 +815,24 @@ def _create_admin_resignation_record(
     return {"ok": True, "dismissal": _format_dismissal_row(row)}
 
 
-def _perform_admin_return_request(conn: Any, body: Dict[str, Any]) -> Dict[str, Any]:
-    _expire_overdue_dismissals(conn)
+def _perform_admin_return_request(
+    conn: Any,
+    body: Dict[str, Any],
+    ip_hash: str = "",
+) -> Tuple[int, Dict[str, Any]]:
+    _expire_overdue_dismissals(conn, force=True)
     pw = str(body.get("password") or "")
-    if not verify_admin_login(conn, pw):
-        raise PermissionError("Número USP não autorizado ou senha incorreta.")
     nusp = normalize_nusp(body.get("numero_usp"))
+    ip_tag = f" [ip:{ip_hash}]" if ip_hash else ""
+    if not verify_admin_login(conn, pw):
+        _log_audit(
+            conn,
+            "ADMIN_LOGIN_FAILED",
+            nusp or "auth",
+            f"RETURN_BAD_PASSWORD: Senha incorreta ao solicitar retorno{ip_tag}",
+            actor=nusp or "Não identificado",
+        )
+        return HTTPStatus.FORBIDDEN, {"error": "Número USP não autorizado ou senha incorreta."}
     if len(nusp) < 4 or len(nusp) > 15:
         raise ValueError("Informe um Número USP válido (4 a 15 dígitos).")
 
@@ -821,11 +908,14 @@ def _perform_admin_return_request(conn: Any, body: Dict[str, Any]) -> Dict[str, 
         """,
         (req_id,),
     ).fetchone()
-    return {
-        "ok": True,
-        "request": _format_dismissal_row(row),
-        "message": "Solicitação de retorno enviada. Aguarde a aprovação de um administrador ativo.",
-    }
+    return (
+        HTTPStatus.CREATED,
+        {
+            "ok": True,
+            "request": _format_dismissal_row(row),
+            "message": "Solicitação de retorno enviada. Aguarde a aprovação de um administrador ativo.",
+        },
+    )
 
 
 def _respond_admin_dismissal_record(
@@ -834,7 +924,7 @@ def _respond_admin_dismissal_record(
     body: Dict[str, Any],
     current_uid: int,
 ) -> Dict[str, Any]:
-    _expire_overdue_dismissals(conn)
+    _expire_overdue_dismissals(conn, force=True)
     row = conn.execute(
         """
         SELECT id, target_user_id, target_numero_usp, target_nome,
@@ -1793,6 +1883,36 @@ class LSEEController:
     def _is_admin(self) -> bool:
         return self._resolve_request_admin(touch=False) is not None
 
+    def _apply_security_headers(self, resp: Response, secure: bool) -> None:
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        resp.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        if secure:
+            resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+
+    def _verify_same_origin(self) -> bool:
+        origin = (request.headers.get("Origin") or "").strip()
+        referer = (request.headers.get("Referer") or "").strip()
+        candidate = origin or referer
+        if not candidate:
+            return True
+        parsed = urlparse(candidate)
+        netloc = (parsed.netloc or "").lower()
+        if not netloc:
+            return True
+        allowed_hosts = {
+            (request.host or "").lower(),
+            (request.headers.get("X-Forwarded-Host") or "").split(",")[0].strip().lower(),
+        } - {""}
+        if netloc in allowed_hosts:
+            return True
+        self._send_json(
+            {"error": "Origem da requisição não autorizada."},
+            status=HTTPStatus.FORBIDDEN,
+        )
+        return False
+
     def _send_json(
         self,
         payload: Any,
@@ -1804,9 +1924,8 @@ class LSEEController:
         resp = Response(body, status=int(status), mimetype="application/json")
         resp.headers["Content-Type"] = "application/json; charset=utf-8"
         resp.headers["Cache-Control"] = "no-store"
-        resp.headers["X-Content-Type-Options"] = "nosniff"
-        resp.headers["X-Frame-Options"] = "DENY"
         secure = request.is_secure or is_secure_cookie_env()
+        self._apply_security_headers(resp, secure)
         if cookie_token is not None:
             resp.set_cookie(
                 SESSION_COOKIE_NAME,
@@ -1836,11 +1955,12 @@ class LSEEController:
         filename: str,
         status: int = HTTPStatus.OK,
     ) -> None:
+        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", filename or "download")
         resp = Response(content, status=int(status), mimetype=content_type)
-        resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        resp.headers["Content-Disposition"] = f'attachment; filename="{safe_name}"'
         resp.headers["Cache-Control"] = "no-store"
-        resp.headers["X-Content-Type-Options"] = "nosniff"
-        resp.headers["X-Frame-Options"] = "DENY"
+        secure = request.is_secure or is_secure_cookie_env()
+        self._apply_security_headers(resp, secure)
         self._response = resp
 
     def _read_json_body(self) -> Dict[str, Any]:
@@ -1877,16 +1997,16 @@ class LSEEController:
         resp = Response(target.read_bytes(), status=HTTPStatus.OK, mimetype=ctype)
         resp.headers["Content-Type"] = content_type
         if clean == "index.html":
-            resp.headers["Cache-Control"] = "public, max-age=60, s-maxage=3600, stale-while-revalidate=86400"
+            resp.headers["Cache-Control"] = "public, max-age=60, s-maxage=60, stale-while-revalidate=600"
         else:
             resp.headers["Cache-Control"] = "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800"
-        resp.headers["X-Content-Type-Options"] = "nosniff"
-        resp.headers["X-Frame-Options"] = "DENY"
+        secure = request.is_secure or is_secure_cookie_env()
+        self._apply_security_headers(resp, secure)
         return resp
 
     def _with_public_cache(self, resp: Response) -> Response:
         if resp.status_code == HTTPStatus.OK:
-            resp.headers["Cache-Control"] = "public, max-age=10, s-maxage=30, stale-while-revalidate=60"
+            resp.headers["Cache-Control"] = "public, max-age=60, s-maxage=60, stale-while-revalidate=120"
         return resp
 
     # ---------------- GET ----------------
@@ -1901,6 +2021,27 @@ class LSEEController:
         try:
             if path == "/api/auth/status":
                 claims = self._extract_raw_claims()
+                if not claims:
+                    cached_meta = _server_cache_get("auth:anon_meta")
+                    if cached_meta is None:
+                        with db_session() as conn:
+                            _expire_overdue_dismissals(conn)
+                            cached_meta = {
+                                "needs_bootstrap": _needs_admin_bootstrap(conn),
+                                "responsibles": _get_public_responsibles(conn),
+                            }
+                        _server_cache_set("auth:anon_meta", cached_meta)
+                    self._send_json(
+                        {
+                            "is_admin": False,
+                            "needs_bootstrap": cached_meta["needs_bootstrap"],
+                            "user": None,
+                            "pending_dismissals": [],
+                            "responsibles": cached_meta["responsibles"],
+                        }
+                    )
+                    return self._response  # type: ignore[return-value]
+
                 with db_session() as conn:
                     _expire_overdue_dismissals(conn)
                     needs_bootstrap = _needs_admin_bootstrap(conn)
@@ -1908,8 +2049,10 @@ class LSEEController:
                     if resolved:
                         _touch_admin_session(conn, resolved)
                         pending_dismissals = _get_pending_dismissals_for_user(conn, resolved["uid"])
+                        collab_payload = _get_collab_payload(conn, resolved)
                     else:
                         pending_dismissals = []
+                        collab_payload = None
                     responsibles = _get_public_responsibles(conn)
                 user_out = (
                     {
@@ -1921,15 +2064,16 @@ class LSEEController:
                     if resolved
                     else None
                 )
-                self._send_json(
-                    {
-                        "is_admin": resolved is not None,
-                        "needs_bootstrap": needs_bootstrap,
-                        "user": user_out,
-                        "pending_dismissals": pending_dismissals,
-                        "responsibles": responsibles,
-                    }
-                )
+                payload_out: Dict[str, Any] = {
+                    "is_admin": resolved is not None,
+                    "needs_bootstrap": needs_bootstrap,
+                    "user": user_out,
+                    "pending_dismissals": pending_dismissals,
+                    "responsibles": responsibles,
+                }
+                if collab_payload is not None:
+                    payload_out["collab"] = collab_payload
+                self._send_json(payload_out)
                 return self._response  # type: ignore[return-value]
 
             if path == "/api/public/dashboard":
@@ -1953,16 +2097,18 @@ class LSEEController:
                 return self._with_public_cache(self._response)  # type: ignore[arg-type]
 
             if path == "/api/public/usage-rules":
-                with db_session() as conn:
-                    row = conn.execute(
-                        "SELECT content, updated_at FROM site_contents WHERE `key` = 'usage_rules'"
-                    ).fetchone()
-                self._send_json(
-                    {
+                cached_rules = _server_cache_get("pub:usage_rules")
+                if cached_rules is None:
+                    with db_session() as conn:
+                        row = conn.execute(
+                            "SELECT content, updated_at FROM site_contents WHERE `key` = 'usage_rules'"
+                        ).fetchone()
+                    cached_rules = {
                         "content": row["content"] if row else DEFAULT_USAGE_RULES,
                         "updated_at": (row["updated_at"] or "") if row else "",
                     }
-                )
+                    _server_cache_set("pub:usage_rules", cached_rules)
+                self._send_json(cached_rules)
                 return self._with_public_cache(self._response)  # type: ignore[arg-type]
 
             # Rotas administrativas (exigem sessão válida)
@@ -1977,25 +2123,36 @@ class LSEEController:
                 return self._response  # type: ignore[return-value]
 
             self._send_json({"error": "Endpoint não encontrado."}, status=HTTPStatus.NOT_FOUND)
-        except Exception as exc:
-            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+        except Exception:
+            traceback.print_exc()
+            self._send_json({"error": "Erro interno ao processar a solicitação."}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
         return self._response  # type: ignore[return-value]
 
     # ---------------- POST ----------------
     def handle_post(self, path: str) -> Response:
+        if not self._verify_same_origin():
+            return self._response  # type: ignore[return-value]
         try:
             if path == "/api/auth/login":
                 body = self._read_json_body()
+                ip_hash = _client_ip_hash()
                 with db_session() as conn:
-                    status, payload, token = _perform_admin_login(conn, body)
+                    _enforce_auth_rate_limit(conn, ip_hash)
+                    status, payload, token = _perform_admin_login(conn, body, ip_hash=ip_hash)
+                if status == HTTPStatus.OK:
+                    _server_cache_clear()
                 self._send_json(payload, status=status, cookie_token=token)
                 return self._response  # type: ignore[return-value]
 
             if path == "/api/auth/request-return":
                 body = self._read_json_body()
+                ip_hash = _client_ip_hash()
                 with db_session() as conn:
-                    res = _perform_admin_return_request(conn, body)
-                self._send_json(res, status=HTTPStatus.CREATED)
+                    _enforce_auth_rate_limit(conn, ip_hash)
+                    status, res = _perform_admin_return_request(conn, body, ip_hash=ip_hash)
+                if status < HTTPStatus.BAD_REQUEST:
+                    _server_cache_clear()
+                self._send_json(res, status=status)
                 return self._response  # type: ignore[return-value]
 
             if path == "/api/auth/logout":
@@ -2003,6 +2160,7 @@ class LSEEController:
                 with db_session() as conn:
                     _perform_admin_logout(conn, claims)
                     responsibles = _get_public_responsibles(conn)
+                _server_cache_clear()
                 self._send_json({"is_admin": False, "responsibles": responsibles}, clear_cookie=True)
                 return self._response  # type: ignore[return-value]
 
@@ -2015,21 +2173,32 @@ class LSEEController:
                     self._route_admin_post(path, body)
                 finally:
                     _CURRENT_ADMIN_ACTOR.reset(tok)
+                if not (
+                    path.startswith("/api/admin/collab/")
+                    or path.startswith("/api/admin/labels/")
+                    or path in ("/api/admin/requests/docx", "/api/admin/requests/pdf")
+                ):
+                    _server_cache_clear()
                 return self._response  # type: ignore[return-value]
 
             self._send_json({"error": "Endpoint não encontrado."}, status=HTTPStatus.NOT_FOUND)
+        except _RateLimitError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.TOO_MANY_REQUESTS)
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
         except PermissionError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.FORBIDDEN)
         except LookupError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
-        except Exception as exc:
-            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+        except Exception:
+            traceback.print_exc()
+            self._send_json({"error": "Erro interno ao processar a solicitação."}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
         return self._response  # type: ignore[return-value]
 
     # ---------------- PUT ----------------
     def handle_put(self, path: str) -> Response:
+        if not self._verify_same_origin():
+            return self._response  # type: ignore[return-value]
         try:
             if path.startswith("/api/admin/"):
                 if not self._require_admin():
@@ -2040,6 +2209,7 @@ class LSEEController:
                     self._route_admin_put(path, body)
                 finally:
                     _CURRENT_ADMIN_ACTOR.reset(tok)
+                _server_cache_clear()
                 return self._response  # type: ignore[return-value]
             self._send_json({"error": "Endpoint não encontrado."}, status=HTTPStatus.NOT_FOUND)
         except ValueError as exc:
@@ -2048,12 +2218,15 @@ class LSEEController:
             self._send_json({"error": str(exc)}, status=HTTPStatus.FORBIDDEN)
         except LookupError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
-        except Exception as exc:
-            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+        except Exception:
+            traceback.print_exc()
+            self._send_json({"error": "Erro interno ao processar a solicitação."}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
         return self._response  # type: ignore[return-value]
 
     # ---------------- DELETE ----------------
     def handle_delete(self, path: str) -> Response:
+        if not self._verify_same_origin():
+            return self._response  # type: ignore[return-value]
         try:
             if path.startswith("/api/admin/"):
                 if not self._require_admin():
@@ -2063,6 +2236,7 @@ class LSEEController:
                     self._route_admin_delete(path)
                 finally:
                     _CURRENT_ADMIN_ACTOR.reset(tok)
+                _server_cache_clear()
                 return self._response  # type: ignore[return-value]
             self._send_json({"error": "Endpoint não encontrado."}, status=HTTPStatus.NOT_FOUND)
         except ValueError as exc:
@@ -2071,14 +2245,20 @@ class LSEEController:
             self._send_json({"error": str(exc)}, status=HTTPStatus.FORBIDDEN)
         except LookupError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
-        except Exception as exc:
-            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+        except Exception:
+            traceback.print_exc()
+            self._send_json({"error": "Erro interno ao processar a solicitação."}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
         return self._response  # type: ignore[return-value]
 
     # ---------------- PUBLIC HANDLERS ----------------
     def _handle_public_dashboard(self) -> None:
+        cached = _server_cache_get("pub:dashboard")
+        if cached is not None:
+            self._send_json(cached)
+            return
         with db_session() as conn:
             state = compute_state(conn)
+            responsibles = _get_public_responsibles(conn)
         dash = state["dashboard"]
         anon = state["rules"]["public_anonymize_names"]
 
@@ -2108,23 +2288,28 @@ class LSEEController:
             for p in dash["fila_prioridade"]
         ]
 
-        self._send_json(
-            {
-                "anonymized": anon,
-                "cards": {
-                    "pcs_individuais": dash["pcs_individuais"],
-                    "em_uso": dash["em_uso"],
-                    "livres": dash["livres"],
-                    "manutencao": dash["manutencao"],
-                    "pessoas_sem_pc": dash["pessoas_sem_pc"],
-                },
-                "top_pcs_livres": dash["top_pcs_livres"],
-                "pessoas_sem_pc_lista": sem_pc,
-                "fila_prioridade": fila,
-            }
-        )
+        payload = {
+            "anonymized": anon,
+            "responsibles": responsibles,
+            "cards": {
+                "pcs_individuais": dash["pcs_individuais"],
+                "em_uso": dash["em_uso"],
+                "livres": dash["livres"],
+                "manutencao": dash["manutencao"],
+                "pessoas_sem_pc": dash["pessoas_sem_pc"],
+            },
+            "top_pcs_livres": dash["top_pcs_livres"],
+            "pessoas_sem_pc_lista": sem_pc,
+            "fila_prioridade": fila,
+        }
+        _server_cache_set("pub:dashboard", payload)
+        self._send_json(payload)
 
     def _handle_public_computers(self) -> None:
+        cached = _server_cache_get("pub:computers")
+        if cached is not None:
+            self._send_json(cached)
+            return
         with db_session() as conn:
             state = compute_state(conn)
         anon = state["rules"]["public_anonymize_names"]
@@ -2151,9 +2336,16 @@ class LSEEController:
                     ),
                 }
             )
-        self._send_json({"anonymized": anon, "items": public_pcs})
+        payload = {"anonymized": anon, "items": public_pcs}
+        _server_cache_set("pub:computers", payload)
+        self._send_json(payload)
 
     def _handle_public_simulator(self, pc_id: str) -> None:
+        cache_key = f"pub:sim:{pc_id}"
+        cached = _server_cache_get(cache_key)
+        if cached is not None:
+            self._send_json(cached)
+            return
         with db_session() as conn:
             state = compute_state(conn)
         anon = state["rules"]["public_anonymize_names"]
@@ -2180,25 +2372,36 @@ class LSEEController:
                     "ultimo_upgrade": r["ultimo_upgrade"],
                 }
             )
-        self._send_json(
-            {
-                "anonymized": anon,
-                "available_pcs": available_pcs,
-                "pc": sim.get("pc"),
-                "diff_min_upgrade": state["rules"]["diff_min_upgrade"],
-                "rows": public_rows,
-            }
-        )
+        payload = {
+            "anonymized": anon,
+            "available_pcs": available_pcs,
+            "pc": sim.get("pc"),
+            "diff_min_upgrade": state["rules"]["diff_min_upgrade"],
+            "rows": public_rows,
+        }
+        _server_cache_set(cache_key, payload)
+        self._send_json(payload)
 
     def _handle_public_score_info(self) -> None:
+        cached = _server_cache_get("pub:score_info")
+        if cached is not None:
+            self._send_json(cached)
+            return
         with db_session() as conn:
             state = compute_state(conn)
-        self._send_json(build_score_summary(state))
+        payload = build_score_summary(state)
+        _server_cache_set("pub:score_info", payload)
+        self._send_json(payload)
 
     def _handle_public_map(self) -> None:
+        cached = _server_cache_get("pub:map")
+        if cached is not None:
+            self._send_json(cached)
+            return
         with db_session() as conn:
             state = compute_state(conn)
             payload = _build_map_payload(conn, state, admin_mode=False)
+        _server_cache_set("pub:map", payload)
         self._send_json(payload)
 
     def _handle_admin_rules(self, conn: Any) -> None:
@@ -2898,6 +3101,8 @@ class LSEEController:
                 return
 
             if path == "/api/admin/reimport":
+                if os.environ.get("VERCEL") == "1":
+                    raise PermissionError("Reimportação por caminho local desativada no ambiente em nuvem.")
                 counts = import_xlsx_into_db(conn, DEFAULT_XLSX_PATH)
                 self._send_json({"ok": True, "counts": counts})
                 return

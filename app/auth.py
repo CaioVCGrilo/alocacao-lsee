@@ -239,11 +239,11 @@ def create_session_token(
 
 
 def parse_session_token(token: str) -> Optional[Dict[str, Any]]:
-    """Valida assinatura HMAC-SHA512 e expiração do token e retorna os dados do ADM."""
+    """Valida assinatura HMAC-SHA512, expiração e vínculo obrigatório a uid/sid."""
     if not token:
         return None
     parts = token.split(".")
-    if len(parts) not in (3, 4):
+    if len(parts) != 4:
         return None
     expiry_str = parts[0]
     sig = parts[-1]
@@ -259,16 +259,18 @@ def parse_session_token(token: str) -> Optional[Dict[str, Any]]:
     ).hexdigest()
     if not hmac.compare_digest(sig, expected_sig):
         return None
-    if len(parts) == 3:
-        return {"uid": 0, "nusp": "", "nome": "Administrador", "sid": ""}
     try:
         padded = parts[2] + "=" * (-len(parts[2]) % 4)
         decoded = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        uid = int(decoded.get("uid") or 0)
+        sid = str(decoded.get("sid") or "").strip()
+        if uid <= 0 or not sid:
+            return None
         return {
-            "uid": int(decoded.get("uid") or 0),
+            "uid": uid,
             "nusp": str(decoded.get("nusp") or ""),
             "nome": str(decoded.get("nome") or "Administrador"),
-            "sid": str(decoded.get("sid") or ""),
+            "sid": sid,
         }
     except Exception:
         return None

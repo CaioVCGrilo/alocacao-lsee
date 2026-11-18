@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import posixpath
 import re
 import zipfile
 import xml.etree.ElementTree as ET
@@ -14,6 +15,10 @@ NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 CATEGORY_ORDER = ["Computadores", "Notebook", "Impressoras", "Servidores", "Porta"]
+
+_MAX_XLSX_RAW_BYTES = 5 * 1024 * 1024
+_MAX_XLSX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
+_MAX_ZIP_ENTRIES = 100
 
 
 def _natural_sort_key(text: str) -> Tuple[Any, ...]:
@@ -241,23 +246,49 @@ def build_network_xlsx(rows: List[Dict[str, Any]]) -> bytes:
     return buf.getvalue()
 
 
+def _safe_xml_from_zip(zf: zipfile.ZipFile, member_path: str) -> ET.Element:
+    """Lê membro XML de um ZIP validando traversal, tamanho descompactado e DTD/entidades."""
+    clean = posixpath.normpath(member_path.lstrip("/"))
+    if clean.startswith("..") or ".." in clean.split("/") or clean not in zf.namelist():
+        raise ValueError("Estrutura interna da planilha inválida.")
+    info = zf.getinfo(clean)
+    if info.file_size > _MAX_XLSX_UNCOMPRESSED_BYTES:
+        raise ValueError("Planilha excede o limite de tamanho permitido.")
+    data = zf.read(clean)
+    if len(data) > _MAX_XLSX_UNCOMPRESSED_BYTES:
+        raise ValueError("Planilha excede o limite de tamanho permitido.")
+    if b"<!" in data:
+        upper = data.upper()
+        if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+            raise ValueError("XML com declarações DTD/entidades externas não é permitido.")
+    return ET.fromstring(data)
+
+
 def _read_sheets_from_bytes(raw_bytes: bytes) -> List[Tuple[str, Dict[int, Dict[str, str]]]]:
+    if len(raw_bytes) > _MAX_XLSX_RAW_BYTES:
+        raise ValueError("Arquivo .xlsx excede o limite máximo de 5 MB.")
     try:
         zf = zipfile.ZipFile(io.BytesIO(raw_bytes), "r")
     except zipfile.BadZipFile as exc:
         raise ValueError("Arquivo .xlsx inválido ou corrompido.") from exc
 
     with zf:
+        infos = zf.infolist()
+        if len(infos) > _MAX_ZIP_ENTRIES:
+            raise ValueError("Arquivo .xlsx excede a quantidade máxima de entradas internas.")
+        if sum(i.file_size for i in infos) > _MAX_XLSX_UNCOMPRESSED_BYTES:
+            raise ValueError("Conteúdo descompactado da planilha excede o limite de 20 MB.")
+
         strings: List[str] = []
         if "xl/sharedStrings.xml" in zf.namelist():
-            sst = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+            sst = _safe_xml_from_zip(zf, "xl/sharedStrings.xml")
             for si in sst.findall(f"{{{NS_MAIN}}}si"):
                 strings.append("".join(t.text or "" for t in si.findall(f".//{{{NS_MAIN}}}t")))
 
-        wb = ET.fromstring(zf.read("xl/workbook.xml"))
+        wb = _safe_xml_from_zip(zf, "xl/workbook.xml")
         rels = {
             r.attrib["Id"]: r.attrib["Target"]
-            for r in ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+            for r in _safe_xml_from_zip(zf, "xl/_rels/workbook.xml.rels")
         }
 
         out: List[Tuple[str, Dict[int, Dict[str, str]]]] = []
@@ -265,7 +296,7 @@ def _read_sheets_from_bytes(raw_bytes: bytes) -> List[Tuple[str, Dict[int, Dict[
             name = sh.attrib["name"]
             target = rels[sh.attrib[f"{{{NS_REL}}}id"]]
             tpath = target.lstrip("/") if target.startswith(("xl/", "/xl/")) else "xl/" + target.lstrip("/")
-            root = ET.fromstring(zf.read(tpath))
+            root = _safe_xml_from_zip(zf, tpath)
 
             rows_map: Dict[int, Dict[str, str]] = {}
             for row in root.findall(f".//{{{NS_MAIN}}}sheetData/{{{NS_MAIN}}}row"):

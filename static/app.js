@@ -61,6 +61,7 @@ const state = {
     chatOpen: false,
     timer: null,
     pollingBusy: false,
+    lastPollAt: 0,
     pending_dismissals: [],
     shownDismissalIds: [],
   },
@@ -312,21 +313,168 @@ function showToast(msg, isError = false) {
   setTimeout(() => el.remove(), 3800);
 }
 
+const API_CACHE_TTL_MS = 60_000;
+const API_CACHE_PREFIX = "lsee_api_v1:";
+const apiMemCache = new Map();
+const apiInflight = new Map();
+let activeLoaderCount = 0;
+
+function syncPageLoaderBar(forceLoading = false) {
+  const bar = document.getElementById("page-loader-bar");
+  if (!bar) return;
+  bar.classList.toggle("is-loading", forceLoading || activeLoaderCount > 0);
+}
+
+function startPageLoader() {
+  activeLoaderCount += 1;
+  syncPageLoaderBar();
+}
+
+function stopPageLoader() {
+  activeLoaderCount = Math.max(0, activeLoaderCount - 1);
+  syncPageLoaderBar();
+}
+
+function buildTabLoadingHtml(tabName) {
+  const label = ADMIN_TAB_LABELS[tabName] || "página";
+  return `
+    <div class="tab-loading-state" role="status" aria-live="polite">
+      <div class="lsee-spinner" aria-hidden="true"></div>
+      <p class="tab-loading-title">Carregando ${esc(label)}...</p>
+      <p class="tab-loading-sub">Buscando dados atualizados do laboratório</p>
+      <div class="tab-loading-skeleton" aria-hidden="true">
+        <span class="skeleton-line w-80"></span>
+        <span class="skeleton-line w-60"></span>
+        <span class="skeleton-line w-70"></span>
+      </div>
+    </div>
+  `;
+}
+
+function getApiCacheKey(url) {
+  if (url === "/api/auth/status") {
+    return `${API_CACHE_PREFIX}any:${url}`;
+  }
+  return `${API_CACHE_PREFIX}${state.isAdmin ? "adm" : "pub"}:${url}`;
+}
+
+function cloneJsonSafe(val) {
+  if (typeof structuredClone === "function") {
+    return structuredClone(val);
+  }
+  return JSON.parse(JSON.stringify(val));
+}
+
+function readApiCache(key) {
+  const now = Date.now();
+  const mem = apiMemCache.get(key);
+  if (mem) {
+    if (now - mem.ts < API_CACHE_TTL_MS) {
+      return cloneJsonSafe(mem.data);
+    }
+    apiMemCache.delete(key);
+  }
+  try {
+    if (typeof sessionStorage !== "undefined") {
+      const raw = sessionStorage.getItem(key);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.ts === "number" && now - parsed.ts < API_CACHE_TTL_MS) {
+          apiMemCache.set(key, parsed);
+          return cloneJsonSafe(parsed.data);
+        }
+        sessionStorage.removeItem(key);
+      }
+    }
+  } catch {
+    // ignora restrições de storage
+  }
+  return null;
+}
+
+function writeApiCache(key, data) {
+  const entry = { ts: Date.now(), data };
+  apiMemCache.set(key, entry);
+  try {
+    if (typeof sessionStorage !== "undefined") {
+      sessionStorage.setItem(key, JSON.stringify(entry));
+    }
+  } catch {
+    // ignora quota excedida
+  }
+}
+
+function invalidateApiCache() {
+  apiMemCache.clear();
+  try {
+    if (typeof sessionStorage !== "undefined") {
+      const toRemove = [];
+      for (let i = 0; i < sessionStorage.length; i += 1) {
+        const k = sessionStorage.key(i);
+        if (k && k.startsWith(API_CACHE_PREFIX)) {
+          toRemove.push(k);
+        }
+      }
+      toRemove.forEach((k) => sessionStorage.removeItem(k));
+    }
+  } catch {
+    // ignora restrições de storage
+  }
+}
+
 async function apiFetch(url, options = {}) {
+  const { skipCache = false, headers: customHeaders, ...fetchOpts } = options;
+  const method = String(fetchOpts.method || "GET").toUpperCase();
+  const isCacheableGet = method === "GET" && !skipCache && !url.startsWith("/api/admin/collab");
+  const cacheKey = isCacheableGet ? getApiCacheKey(url) : "";
+
+  if (isCacheableGet) {
+    const cached = readApiCache(cacheKey);
+    if (cached !== null) {
+      return cached;
+    }
+    if (apiInflight.has(cacheKey)) {
+      const shared = await apiInflight.get(cacheKey);
+      return cloneJsonSafe(shared);
+    }
+  }
+
   const opts = {
     credentials: "same-origin",
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
+    headers: { "Content-Type": "application/json", ...(customHeaders || {}) },
+    ...fetchOpts,
   };
-  const resp = await fetch(url, opts);
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    const err = new Error(data.error || `Erro HTTP ${resp.status}`);
-    err.status = resp.status;
-    err.data = data;
-    throw err;
+  if (method === "GET" && skipCache) {
+    opts.cache = "no-cache";
   }
-  return data;
+
+  const reqPromise = (async () => {
+    const resp = await fetch(url, opts);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const err = new Error(data.error || `Erro HTTP ${resp.status}`);
+      err.status = resp.status;
+      err.data = data;
+      throw err;
+    }
+    if (isCacheableGet) {
+      writeApiCache(cacheKey, data);
+    } else if (method !== "GET" && !url.startsWith("/api/admin/collab/")) {
+      invalidateApiCache();
+    }
+    return data;
+  })();
+
+  if (isCacheableGet) {
+    apiInflight.set(cacheKey, reqPromise);
+    try {
+      const result = await reqPromise;
+      return cloneJsonSafe(result);
+    } finally {
+      apiInflight.delete(cacheKey);
+    }
+  }
+  return reqPromise;
 }
 
 async function apiDownload(url, payload = null, fallbackFilename = "download") {
@@ -733,11 +881,18 @@ async function pollCollab(sendHeartbeat = true) {
           method: "POST",
           body: JSON.stringify({ active_tab: state.activeTab }),
         })
-      : await apiFetch(`/api/admin/collab?tab=${encodeURIComponent(state.activeTab)}`);
+      : await apiFetch(`/api/admin/collab?tab=${encodeURIComponent(state.activeTab)}`, { skipCache: true });
+    state.collab.lastPollAt = Date.now();
     applyCollabData(data);
   } catch (err) {
     if (err && err.status === 401) {
       stopCollabPolling();
+      invalidateApiCache();
+      try {
+        localStorage.removeItem("lsee_admin_hint");
+      } catch {
+        // ignora
+      }
       state.isAdmin = false;
       state.currentUser = null;
       updateAuthUI();
@@ -756,7 +911,7 @@ function scheduleNextCollabPoll() {
   }
   if (!state.isAdmin || typeof setTimeout !== "function") return;
   if (typeof document !== "undefined" && document.hidden) return;
-  const delay = state.collab.chatOpen ? 15000 : 45000;
+  const delay = state.collab.chatOpen ? 20000 : 60000;
   state.collab.timer = setTimeout(async () => {
     if (typeof document !== "undefined" && document.hidden) return;
     await pollCollab(true);
@@ -768,7 +923,11 @@ if (typeof document !== "undefined" && !document.__lseeCollabVisibilityBound) {
   document.__lseeCollabVisibilityBound = true;
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && state.isAdmin) {
-      pollCollab(true).then(() => scheduleNextCollabPoll());
+      if (Date.now() - (state.collab.lastPollAt || 0) >= 20000) {
+        pollCollab(true).then(() => scheduleNextCollabPoll());
+      } else {
+        scheduleNextCollabPoll();
+      }
     } else if (document.hidden && state.collab.timer) {
       clearTimeout(state.collab.timer);
       state.collab.timer = null;
@@ -776,10 +935,15 @@ if (typeof document !== "undefined" && !document.__lseeCollabVisibilityBound) {
   });
 }
 
-function startCollabPolling() {
+function startCollabPolling(immediate = true) {
   stopCollabPolling();
   if (!state.isAdmin) return;
-  pollCollab(true).then(() => scheduleNextCollabPoll());
+  if (immediate) {
+    pollCollab(true).then(() => scheduleNextCollabPoll());
+  } else {
+    state.collab.lastPollAt = Date.now();
+    scheduleNextCollabPoll();
+  }
 }
 
 function stopCollabPolling() {
@@ -925,15 +1089,38 @@ function switchTab(tabName) {
   document.querySelectorAll(".tab-panel").forEach((panel) => {
     panel.classList.toggle("active", panel.id === `tab-${tabName}`);
   });
-  if (state.isAdmin) {
+  if (state.isAdmin && Date.now() - (state.collab.lastPollAt || 0) >= 25000) {
     pollCollab(true);
   }
   loadActiveTab();
 }
 
 async function loadActiveTab() {
+  const tab = state.activeTab;
+  const panel = document.getElementById(`tab-${tab}`);
+  const hasRealContent = Boolean(
+    panel && panel.children.length > 0 && !panel.querySelector(".tab-loading-state")
+  );
+  let reloadingPill = null;
+
+  startPageLoader();
+  if (panel) {
+    if (!hasRealContent) {
+      panel.innerHTML = buildTabLoadingHtml(tab);
+    } else {
+      panel.classList.add("is-reloading");
+      if (!document.querySelector(".tab-reloading-pill")) {
+        reloadingPill = document.createElement("div");
+        reloadingPill.className = "tab-reloading-pill";
+        reloadingPill.setAttribute("role", "status");
+        reloadingPill.innerHTML = '<span class="lsee-spinner-sm" aria-hidden="true"></span><span>Atualizando...</span>';
+        document.body.appendChild(reloadingPill);
+      }
+    }
+  }
+
   try {
-    switch (state.activeTab) {
+    switch (tab) {
       case "dashboard":
         await renderDashboard();
         break;
@@ -973,6 +1160,26 @@ async function loadActiveTab() {
     }
   } catch (err) {
     showToast(err.message, true);
+    if (panel && !hasRealContent) {
+      panel.innerHTML = `
+        <div class="tab-loading-state" role="alert">
+          <p class="tab-loading-title">Não foi possível carregar esta seção</p>
+          <p class="tab-loading-sub">${esc(err.message || "Falha de comunicação com o servidor.")}</p>
+          <button class="btn btn-primary btn-sm js-retry-tab" type="button">Tentar novamente</button>
+        </div>
+      `;
+      panel.querySelector(".js-retry-tab")?.addEventListener("click", () => loadActiveTab());
+    }
+  } finally {
+    if (reloadingPill) {
+      reloadingPill.remove();
+    }
+    if (panel) {
+      panel.classList.remove("is-reloading", "tab-fade-in");
+      void panel.offsetWidth;
+      panel.classList.add("tab-fade-in");
+    }
+    stopPageLoader();
   }
 }
 
@@ -5668,13 +5875,27 @@ async function openLoginModal() {
     };
     try {
       const res = await apiFetch("/api/auth/login", { method: "POST", body: JSON.stringify(payload) });
+      invalidateApiCache();
       state.isAdmin = Boolean(res.is_admin);
       state.needsBootstrap = false;
       state.currentUser = res.user || null;
+      if (Array.isArray(res.responsibles)) {
+        state.publicResponsibles = res.responsibles;
+      }
+      try {
+        localStorage.setItem("lsee_admin_hint", "1");
+      } catch {
+        // ignora
+      }
       closeModal();
       updateAuthUI();
       applyAuthDismissals(res.pending_dismissals);
-      startCollabPolling();
+      if (res.collab) {
+        applyCollabData(res.collab);
+        startCollabPolling(false);
+      } else {
+        startCollabPolling(true);
+      }
       showToast(state.currentUser?.nome ? `Bem-vindo(a), ${state.currentUser.nome}!` : "Modo Administrador ativado.");
       loadActiveTab();
     } catch (err) {
@@ -5863,6 +6084,12 @@ async function init() {
   document.getElementById("btn-admin-logout").addEventListener("click", async () => {
     const out = await apiFetch("/api/auth/logout", { method: "POST" });
     stopCollabPolling();
+    invalidateApiCache();
+    try {
+      localStorage.removeItem("lsee_admin_hint");
+    } catch {
+      // ignora
+    }
     state.isAdmin = false;
     state.currentUser = null;
     if (Array.isArray(out?.responsibles)) {
@@ -5873,22 +6100,58 @@ async function init() {
     loadActiveTab();
   });
 
+  const hydrateAuthStatus = async () => {
+    try {
+      const auth = await apiFetch("/api/auth/status");
+      state.isAdmin = Boolean(auth.is_admin);
+      state.needsBootstrap = Boolean(auth.needs_bootstrap);
+      state.currentUser = auth.user || null;
+      state.collab.pending_dismissals = Array.isArray(auth.pending_dismissals) ? auth.pending_dismissals : [];
+      state.publicResponsibles = Array.isArray(auth.responsibles) ? auth.responsibles : [];
+      try {
+        if (state.isAdmin) localStorage.setItem("lsee_admin_hint", "1");
+        else localStorage.removeItem("lsee_admin_hint");
+      } catch {
+        // ignora
+      }
+      updateAuthUI();
+      if (state.isAdmin) {
+        if (auth.collab) {
+          applyCollabData(auth.collab);
+          startCollabPolling(false);
+        } else {
+          startCollabPolling(true);
+        }
+      }
+    } catch {
+      state.isAdmin = false;
+      state.currentUser = null;
+      updateAuthUI();
+    }
+  };
+
+  const hasAdminHint = (() => {
+    try {
+      return localStorage.getItem("lsee_admin_hint") === "1";
+    } catch {
+      return false;
+    }
+  })();
+
+  startPageLoader();
   try {
-    const auth = await apiFetch("/api/auth/status");
-    state.isAdmin = Boolean(auth.is_admin);
-    state.needsBootstrap = Boolean(auth.needs_bootstrap);
-    state.currentUser = auth.user || null;
-    state.collab.pending_dismissals = Array.isArray(auth.pending_dismissals) ? auth.pending_dismissals : [];
-    state.publicResponsibles = Array.isArray(auth.responsibles) ? auth.responsibles : [];
-  } catch {
-    state.isAdmin = false;
-    state.currentUser = null;
+    if (hasAdminHint) {
+      await hydrateAuthStatus();
+      await loadActiveTab();
+    } else {
+      await Promise.all([hydrateAuthStatus(), loadActiveTab()]);
+      if (state.isAdmin) {
+        await loadActiveTab();
+      }
+    }
+  } finally {
+    stopPageLoader();
   }
-  updateAuthUI();
-  if (state.isAdmin) {
-    startCollabPolling();
-  }
-  await loadActiveTab();
 }
 
 window.closeModal = closeModal;

@@ -8,6 +8,9 @@
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
+  <div id="page-loader-bar" class="page-loader-bar is-loading" aria-hidden="true">
+    <div class="page-loader-bar-fill"></div>
+  </div>
   <header class="topbar">
     <div class="brand-rail" aria-hidden="true"></div>
     <div class="topbar-inner">
@@ -63,7 +66,18 @@
     <div id="toast-area" class="toast-area" aria-live="polite"></div>
 
     <!-- TAB: DASHBOARD -->
-    <section id="tab-dashboard" class="tab-panel active"></section>
+    <section id="tab-dashboard" class="tab-panel active">
+      <div class="tab-loading-state" role="status" aria-live="polite">
+        <div class="lsee-spinner" aria-hidden="true"></div>
+        <p class="tab-loading-title">Carregando Dashboard...</p>
+        <p class="tab-loading-sub">Consultando dados atualizados do laboratório</p>
+        <div class="tab-loading-skeleton" aria-hidden="true">
+          <span class="skeleton-line w-80"></span>
+          <span class="skeleton-line w-60"></span>
+          <span class="skeleton-line w-70"></span>
+        </div>
+      </div>
+    </section>
 
     <!-- TAB: COMPUTADORES -->
     <section id="tab-computadores" class="tab-panel"></section>
@@ -143,6 +157,6 @@
     </button>
   </aside>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js" defer></script>
 </body>
 </html>
