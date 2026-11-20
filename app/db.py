@@ -25,6 +25,7 @@ EXPECTED_TABLES = frozenset(
         "people",
         "allocations",
         "monitors",
+        "patrimonies",
         "network_devices",
         "upgrade_decisions",
         "map_stations",
@@ -250,6 +251,24 @@ SCHEMA_STATEMENTS = [
         associado_pc VARCHAR(100),
         projeto VARCHAR(255),
         observacoes TEXT
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS patrimonies (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        numero_patrimonio VARCHAR(100) NOT NULL UNIQUE,
+        nome_item VARCHAR(255) NOT NULL,
+        descricao TEXT,
+        responsavel VARCHAR(255),
+        data_incorporacao VARCHAR(50),
+        fim_garantia VARCHAR(50),
+        valor_pago DOUBLE,
+        origem VARCHAR(150),
+        local_item VARCHAR(255),
+        updated_at VARCHAR(100),
+        INDEX idx_patrimonies_responsavel (responsavel),
+        INDEX idx_patrimonies_origem (origem),
+        INDEX idx_patrimonies_local (local_item)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
     """

@@ -2524,3 +2524,28 @@ tbody tr:hover {
     animation: none !important;
   }
 }
+
+/* ==================== PATRIMÔNIOS (ADMIN) ==================== */
+.kpi-value-money {
+  font-size: 1.38rem;
+  white-space: nowrap;
+}
+
+.pat-desc-cell {
+  min-width: 180px;
+  max-width: 280px;
+  white-space: normal;
+  line-height: 1.35;
+}
+
+.pat-local-cell {
+  min-width: 165px;
+  max-width: 240px;
+  white-space: normal;
+  line-height: 1.35;
+}
+
+.pat-money-cell {
+  text-align: right;
+  white-space: nowrap;
+}

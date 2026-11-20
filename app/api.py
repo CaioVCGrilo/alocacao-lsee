@@ -37,6 +37,14 @@ from .db import DEFAULT_USAGE_RULES, db_session, ensure_default_map_stations
 from .importer import import_xlsx_into_db
 from .labels import build_labels_docx, build_labels_pdf, normalize_label_pages
 from .network_excel import build_network_xlsx, parse_network_xlsx
+from .patrimonies_io import (
+    build_patrimonies_csv,
+    diff_and_upsert_patrimonies,
+    merge_patrimony_batches,
+    parse_brl_currency,
+    parse_date_to_iso,
+    parse_patrimonies_csv,
+)
 from .requests_doc import (
     build_request_docx,
     build_request_pdf,
@@ -128,6 +136,7 @@ ALLOWED_ADMIN_TABS = {
     "pessoas",
     "alocacoes",
     "monitores",
+    "patrimonios",
     "etiquetas",
     "rede",
     "solicitacoes",
@@ -1745,6 +1754,90 @@ def _handle_network_import_xlsx(conn: Any, body: Dict[str, Any]) -> Dict[str, An
     }
 
 
+def _normalize_patrimony_payload(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Valida e normaliza os campos de um item de patrimônio."""
+    numero = " ".join(str(body.get("numero_patrimonio") or "").split())
+    nome_item = " ".join(str(body.get("nome_item") or "").split())
+    if not numero:
+        raise ValueError("Número do patrimônio é obrigatório.")
+    if not nome_item:
+        raise ValueError("Nome do item é obrigatório.")
+
+    raw_val = body.get("valor_pago")
+    valor_pago = parse_brl_currency(raw_val) if str(raw_val or "").strip() != "" else None
+
+    return {
+        "numero_patrimonio": numero,
+        "nome_item": nome_item,
+        "descricao": " ".join(str(body.get("descricao") or "").split()),
+        "responsavel": " ".join(str(body.get("responsavel") or "").split()),
+        "data_incorporacao": parse_date_to_iso(body.get("data_incorporacao")),
+        "fim_garantia": parse_date_to_iso(body.get("fim_garantia")),
+        "valor_pago": valor_pago,
+        "origem": " ".join(str(body.get("origem") or "").split()),
+        "local_item": " ".join(str(body.get("local_item") or "").split()),
+    }
+
+
+def _handle_patrimonies_import_csv(conn: Any, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Pré-visualiza ou importa um ou mais arquivos CSV de patrimônios (USP/Mercúrio ou exportado)."""
+    raw_files = body.get("files")
+    file_entries: list[Dict[str, Any]] = []
+    if isinstance(raw_files, list) and raw_files:
+        file_entries = [f for f in raw_files if isinstance(f, dict)]
+    elif body.get("content_base64"):
+        file_entries = [
+            {
+                "filename": body.get("filename") or "patrimonios.csv",
+                "content_base64": body.get("content_base64"),
+            }
+        ]
+    if not file_entries:
+        raise ValueError("Envie ao menos um arquivo .csv para importação.")
+
+    batches: list[list[Dict[str, Any]]] = []
+    file_summaries: list[Dict[str, Any]] = []
+    for entry in file_entries:
+        fname = str(entry.get("filename") or "patrimonios.csv").strip()
+        b64 = str(entry.get("content_base64") or "").strip()
+        if not b64:
+            raise ValueError(f"Arquivo '{fname}' sem conteúdo.")
+        if "," in b64 and b64.startswith("data:"):
+            b64 = b64.split(",", 1)[1]
+        try:
+            raw_bytes = base64.b64decode(b64, validate=True)
+        except Exception as exc:
+            raise ValueError(f"Conteúdo inválido no arquivo '{fname}'.") from exc
+        parsed = parse_patrimonies_csv(raw_bytes)
+        batches.append(parsed)
+        file_summaries.append({"filename": fname, "count": len(parsed)})
+
+    merged = merge_patrimony_batches(batches)
+    preview_only = bool(body.get("preview_only"))
+    res = diff_and_upsert_patrimonies(conn, merged, _now_iso(), apply_changes=not preview_only)
+
+    if not preview_only:
+        names_label = ", ".join(fs["filename"] for fs in file_summaries)
+        _log_audit(
+            conn,
+            "IMPORT_PATRIMONIES_CSV",
+            names_label[:250],
+            f"{res['total']} itens ({len(res['added'])} novos, {len(res['updated'])} atualizados, {res['unchanged']} sem alteração)",
+        )
+
+    return {
+        "ok": True,
+        "applied": not preview_only,
+        "files": file_summaries,
+        "total": res["total"],
+        "counts_by_responsavel": res["counts_by_responsavel"],
+        "added": res["added"],
+        "updated": res["updated"],
+        "unchanged": res["unchanged"],
+        "preview": merged[:30],
+    }
+
+
 def _format_material_request_row(r: Any) -> Dict[str, Any]:
     d = dict(r)
     fallback_date = str(d.get("created_at") or "")[:10]
@@ -1965,7 +2058,7 @@ class LSEEController:
 
     def _read_json_body(self) -> Dict[str, Any]:
         raw = request.get_data(cache=True)
-        if not raw or len(raw) > 2_000_000:
+        if not raw or len(raw) > 7_000_000:
             return {}
         data = json.loads(raw.decode("utf-8"))
         if not isinstance(data, dict):
@@ -2518,6 +2611,42 @@ class LSEEController:
                 self._send_json({"items": rows, "pcs": sorted(pc_users.keys())})
                 return
 
+            if path == "/api/admin/patrimonies":
+                rows = [
+                    dict(r)
+                    for r in conn.execute(
+                        """
+                        SELECT id, numero_patrimonio, nome_item, descricao, responsavel,
+                               data_incorporacao, fim_garantia, valor_pago, origem, local_item, updated_at
+                        FROM patrimonies
+                        ORDER BY numero_patrimonio ASC, id ASC
+                        """
+                    ).fetchall()
+                ]
+                self._send_json({"items": rows})
+                return
+
+            if path == "/api/admin/patrimonies/export-csv":
+                rows = [
+                    dict(r)
+                    for r in conn.execute(
+                        """
+                        SELECT numero_patrimonio, nome_item, descricao, responsavel,
+                               data_incorporacao, fim_garantia, valor_pago, origem, local_item
+                        FROM patrimonies
+                        ORDER BY numero_patrimonio ASC, id ASC
+                        """
+                    ).fetchall()
+                ]
+                content = build_patrimonies_csv(rows)
+                _log_audit(conn, "EXPORT_PATRIMONIES_CSV", f"{len(rows)} itens", "Patrimônios exportados em CSV")
+                self._send_binary(
+                    content,
+                    "text/csv; charset=utf-8",
+                    f"Patrimonios_LSEE_{_today_str()}.csv",
+                )
+                return
+
             if path == "/api/admin/processors":
                 state = compute_state(conn)
                 self._send_json({"items": state["processors"]})
@@ -2919,6 +3048,43 @@ class LSEEController:
                 self._send_json({"id": cur.lastrowid}, status=HTTPStatus.CREATED)
                 return
 
+            if path == "/api/admin/patrimonies":
+                pat = _normalize_patrimony_payload(body)
+                dup = conn.execute(
+                    "SELECT id FROM patrimonies WHERE numero_patrimonio = ?",
+                    (pat["numero_patrimonio"],),
+                ).fetchone()
+                if dup:
+                    raise ValueError(f"Já existe um patrimônio cadastrado com o número '{pat['numero_patrimonio']}'.")
+                cur = conn.execute(
+                    """
+                    INSERT INTO patrimonies(
+                        numero_patrimonio, nome_item, descricao, responsavel,
+                        data_incorporacao, fim_garantia, valor_pago, origem, local_item, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        pat["numero_patrimonio"],
+                        pat["nome_item"],
+                        pat["descricao"],
+                        pat["responsavel"],
+                        pat["data_incorporacao"],
+                        pat["fim_garantia"],
+                        pat["valor_pago"],
+                        pat["origem"],
+                        pat["local_item"],
+                        _now_iso(),
+                    ),
+                )
+                _log_audit(conn, "CREATE_PATRIMONY", pat["numero_patrimonio"], pat["nome_item"])
+                self._send_json({"id": cur.lastrowid}, status=HTTPStatus.CREATED)
+                return
+
+            if path == "/api/admin/patrimonies/import-csv":
+                res = _handle_patrimonies_import_csv(conn, body)
+                self._send_json(res)
+                return
+
             if path == "/api/admin/processors":
                 name = (body.get("name") or "").strip()
                 threads = _to_opt_int(body.get("threads"))
@@ -3211,6 +3377,44 @@ class LSEEController:
                 self._send_json({"ok": True})
                 return
 
+            if path.startswith("/api/admin/patrimonies/"):
+                pat_pk = int(path.split("/")[4])
+                existing = conn.execute("SELECT id FROM patrimonies WHERE id = ?", (pat_pk,)).fetchone()
+                if not existing:
+                    raise LookupError("Patrimônio não encontrado.")
+                pat = _normalize_patrimony_payload(body)
+                dup = conn.execute(
+                    "SELECT id FROM patrimonies WHERE numero_patrimonio = ? AND id != ?",
+                    (pat["numero_patrimonio"], pat_pk),
+                ).fetchone()
+                if dup:
+                    raise ValueError(f"Já existe outro patrimônio cadastrado com o número '{pat['numero_patrimonio']}'.")
+                conn.execute(
+                    """
+                    UPDATE patrimonies
+                    SET numero_patrimonio = ?, nome_item = ?, descricao = ?, responsavel = ?,
+                        data_incorporacao = ?, fim_garantia = ?, valor_pago = ?, origem = ?,
+                        local_item = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        pat["numero_patrimonio"],
+                        pat["nome_item"],
+                        pat["descricao"],
+                        pat["responsavel"],
+                        pat["data_incorporacao"],
+                        pat["fim_garantia"],
+                        pat["valor_pago"],
+                        pat["origem"],
+                        pat["local_item"],
+                        _now_iso(),
+                        pat_pk,
+                    ),
+                )
+                _log_audit(conn, "UPDATE_PATRIMONY", pat["numero_patrimonio"], pat["nome_item"])
+                self._send_json({"ok": True})
+                return
+
             if path.startswith("/api/admin/processors/"):
                 pr_pk = int(path.split("/")[4])
                 threads = _to_opt_int(body.get("threads")) or 1
@@ -3342,6 +3546,23 @@ class LSEEController:
                 m_pk = int(path.split("/")[4])
                 conn.execute("DELETE FROM monitors WHERE id = ?", (m_pk,))
                 _log_audit(conn, "DELETE_MONITOR", f"row#{m_pk}", "Monitor removido")
+                self._send_json({"ok": True})
+                return
+            if path.startswith("/api/admin/patrimonies/"):
+                pat_pk = int(path.split("/")[4])
+                existing = conn.execute(
+                    "SELECT numero_patrimonio, nome_item FROM patrimonies WHERE id = ?",
+                    (pat_pk,),
+                ).fetchone()
+                if not existing:
+                    raise LookupError("Patrimônio não encontrado.")
+                conn.execute("DELETE FROM patrimonies WHERE id = ?", (pat_pk,))
+                _log_audit(
+                    conn,
+                    "DELETE_PATRIMONY",
+                    existing["numero_patrimonio"] or f"row#{pat_pk}",
+                    existing["nome_item"] or "Patrimônio removido",
+                )
                 self._send_json({"ok": True})
                 return
             if path.startswith("/api/admin/network/"):

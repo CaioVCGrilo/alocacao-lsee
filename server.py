@@ -11,11 +11,19 @@ import subprocess
 import sys
 import time
 
+from datetime import datetime, timezone
+from pathlib import Path
+
 from app.api import run_server
 from app.auth import ensure_admin_password, set_admin_password
 from app.config import DEFAULT_HOST, DEFAULT_PORT, DEFAULT_XLSX_PATH
 from app.db import db_session, init_schema
 from app.importer import import_xlsx_into_db
+from app.patrimonies_io import (
+    diff_and_upsert_patrimonies,
+    merge_patrimony_batches,
+    parse_patrimonies_csv,
+)
 
 
 def bootstrap(force_reimport: bool = False) -> None:
@@ -96,12 +104,40 @@ def _stop_previous_lsee_servers(port: int) -> None:
         time.sleep(0.6)
 
 
+def handle_import_patrimonies(csv_paths: list[str]) -> None:
+    """Importa um ou mais arquivos CSV de patrimônios diretamente para o MySQL."""
+    init_schema()
+    batches = []
+    for raw_path in csv_paths:
+        p = Path(raw_path)
+        if not p.is_file():
+            print(f"Erro: arquivo não encontrado: {p}", file=sys.stderr)
+            sys.exit(1)
+        recs = parse_patrimonies_csv(p.read_bytes())
+        print(f"Lido '{p.name}': {len(recs)} itens")
+        batches.append(recs)
+    merged = merge_patrimony_batches(batches)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with db_session() as conn:
+        res = diff_and_upsert_patrimonies(conn, merged, now_iso, apply_changes=True)
+    print(
+        f"Patrimônios incorporados no MySQL: {res['total']} processados "
+        f"({len(res['added'])} novos, {len(res['updated'])} atualizados, {res['unchanged']} sem alteração)."
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Servidor web LSEE - Alocação de Recursos")
     parser.add_argument("--host", default=DEFAULT_HOST, help="Endereço bind (use 0.0.0.0 para rede local)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Porta HTTP (padrão: 8080)")
     parser.add_argument("--reimport", action="store_true", help="Reimporta os dados da planilha .xlsx")
     parser.add_argument("--set-password", action="store_true", help="Define/altera a senha de administrador")
+    parser.add_argument(
+        "--import-patrimonies",
+        nargs="+",
+        metavar="CSV",
+        help="Importa um ou mais arquivos CSV de patrimônios para o MySQL",
+    )
     parser.add_argument("--init-only", action="store_true", help="Inicializa banco/importação sem subir o servidor")
     parser.add_argument("--restart", action="store_true", help="Substitui instância anterior do servidor LSEE na mesma porta")
     parser.add_argument("--open-browser", action="store_true", help="Abre o navegador após iniciar o servidor")
@@ -110,6 +146,11 @@ def main() -> None:
     if args.set_password:
         handle_set_password()
         return
+
+    if args.import_patrimonies:
+        handle_import_patrimonies(args.import_patrimonies)
+        if args.init_only:
+            return
 
     bootstrap(force_reimport=args.reimport)
     if args.init_only:

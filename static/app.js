@@ -38,6 +38,7 @@ const ADMIN_TAB_LABELS = {
   pessoas: "Pessoas",
   alocacoes: "Alocações",
   monitores: "Monitores",
+  patrimonios: "Patrimônios",
   etiquetas: "Etiquetas",
   rede: "Rede",
   solicitacoes: "Solicitações",
@@ -69,6 +70,7 @@ const state = {
   compFilters: { search: "", status: "", tipo: "", pendencia: "" },
   peopleFilters: { search: "", situacao: "" },
   alocOnlyActive: true,
+  patrimonyFilters: { search: "", responsavel: "", origem: "", local: "" },
   redeFilters: { search: "", categoria: "" },
   tableSorts: {},
   mapFilters: { search: "", room: "", mode: "" },
@@ -114,6 +116,7 @@ const state = {
     people: [],
     allocations: { items: [], people: [], pcs: [] },
     monitors: { items: [], pcs: [] },
+    patrimonies: [],
     network: [],
   },
 };
@@ -274,6 +277,7 @@ async function toggleTableSort(tableKey, colKey) {
     pessoas: renderPeople,
     alocacoes: renderAllocations,
     monitores: renderMonitors,
+    patrimonios: () => renderPatrimonies(true),
     rede: renderNetwork,
     audit_logs: renderParamsAndAudit,
   };
@@ -1068,7 +1072,7 @@ function updateAuthUI() {
     if (!["", "Livre", "Em uso"].includes(state.compFilters.status)) {
       state.compFilters.status = "";
     }
-    const adminTabs = ["criterios", "pessoas", "alocacoes", "monitores", "etiquetas", "rede", "solicitacoes", "parametros"];
+    const adminTabs = ["criterios", "pessoas", "alocacoes", "monitores", "patrimonios", "etiquetas", "rede", "solicitacoes", "parametros"];
     if (adminTabs.includes(state.activeTab)) {
       switchTab("dashboard");
     }
@@ -1144,6 +1148,9 @@ async function loadActiveTab() {
         break;
       case "monitores":
         await renderMonitors();
+        break;
+      case "patrimonios":
+        await renderPatrimonies();
         break;
       case "etiquetas":
         await renderLabels();
@@ -3525,6 +3532,461 @@ function openMonitorModal(mon, pcs) {
   });
 }
 
+/* ==================== PATRIMÔNIOS (ADMIN) ==================== */
+const PATRIMONY_DEFAULT_ORIGINS = [
+  "Compra",
+  "Doação",
+  "Doação - Convênio",
+  "Sispa",
+  "Fabricação Própria",
+];
+
+function formatDateBR(iso) {
+  const s = String(iso || "").trim();
+  if (!s) return "—";
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+  return s;
+}
+
+function formatMoneyBRL(val) {
+  if (val === null || val === undefined || val === "") return "—";
+  const num = Number(val);
+  if (!Number.isFinite(num)) return "—";
+  return num.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+}
+
+function formatMoneyInputBR(val) {
+  if (val === null || val === undefined || val === "") return "";
+  const num = Number(val);
+  if (!Number.isFinite(num)) return String(val);
+  return num.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function renderWarrantyCell(isoDate) {
+  const s = String(isoDate || "").trim();
+  if (!s) return '<span class="muted">—</span>';
+  const today = new Date().toISOString().slice(0, 10);
+  const formatted = esc(formatDateBR(s));
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s) && s >= today) {
+    return `${formatted} <span class="badge badge-livre" style="margin-left:4px;">Ativa</span>`;
+  }
+  return formatted;
+}
+
+async function renderPatrimonies(useCache = false) {
+  const el = document.getElementById("tab-patrimonios");
+  const prevSearch = document.getElementById("pat-search");
+  const hadSearchFocus = Boolean(prevSearch && document.activeElement === prevSearch);
+  const selStart = hadSearchFocus ? prevSearch.selectionStart : null;
+  const selEnd = hadSearchFocus ? prevSearch.selectionEnd : null;
+
+  let items = state.caches.patrimonies;
+  if (!useCache || !Array.isArray(items) || items.length === 0) {
+    const data = await apiFetch("/api/admin/patrimonies");
+    items = Array.isArray(data.items) ? data.items : [];
+    state.caches.patrimonies = items;
+  }
+
+  const responsaveis = [...new Set(items.map((x) => (x.responsavel || "").trim()).filter(Boolean))].sort((a, b) => collatorNat.compare(a, b));
+  const origens = [...new Set(items.map((x) => (x.origem || "").trim()).filter(Boolean))].sort((a, b) => collatorNat.compare(a, b));
+  const locais = [...new Set(items.map((x) => (x.local_item || "").trim()).filter(Boolean))].sort((a, b) => collatorNat.compare(a, b));
+
+  const f = state.patrimonyFilters;
+  const q = (f.search || "").trim().toLowerCase();
+  const filtered = items.filter((x) => {
+    const matchSearch = !q || [
+      x.numero_patrimonio,
+      x.nome_item,
+      x.descricao,
+      x.responsavel,
+      x.origem,
+      x.local_item,
+    ].some((v) => String(v || "").toLowerCase().includes(q));
+    const matchResp = !f.responsavel || (x.responsavel || "") === f.responsavel;
+    const matchOrig = !f.origem || (x.origem || "") === f.origem;
+    const matchLoc = !f.local || (x.local_item || "") === f.local;
+    return matchSearch && matchResp && matchOrig && matchLoc;
+  });
+
+  const sorted = applyTableSort("patrimonios", filtered, {
+    numero_patrimonio: { type: "natural" },
+    nome_item: { type: "text" },
+    descricao: { type: "text" },
+    responsavel: { type: "text" },
+    data_incorporacao: { type: "text" },
+    fim_garantia: { type: "text" },
+    valor_pago: { type: "number" },
+    origem: { type: "text" },
+    local_item: { type: "natural" },
+  });
+
+  const today = new Date().toISOString().slice(0, 10);
+  const totalValor = filtered.reduce((acc, x) => acc + (Number(x.valor_pago) || 0), 0);
+  const activeWarrantyCount = filtered.filter((x) => /^\d{4}-\d{2}-\d{2}$/.test(x.fim_garantia || "") && x.fim_garantia >= today).length;
+  const filteredRespCount = new Set(filtered.map((x) => (x.responsavel || "").trim()).filter(Boolean)).size;
+  const filteredOrigCount = new Set(filtered.map((x) => (x.origem || "").trim()).filter(Boolean)).size;
+  const hasActiveFilter = Boolean(f.search || f.responsavel || f.origem || f.local);
+
+  el.innerHTML = `
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">Patrimônios</div>
+        <div class="kpi-value">${filtered.length}</div>
+        <div class="kpi-sub">${hasActiveFilter ? `de ${items.length} cadastrados` : "itens cadastrados no LAB"}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Valor Total</div>
+        <div class="kpi-value kpi-value-money">${esc(formatMoneyBRL(totalValor))}</div>
+        <div class="kpi-sub">${hasActiveFilter ? "soma dos itens filtrados" : "valor total incorporado"}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Responsáveis</div>
+        <div class="kpi-value">${filteredRespCount}</div>
+        <div class="kpi-sub">${filteredOrigCount} ${filteredOrigCount === 1 ? "origem" : "origens"}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Em Garantia</div>
+        <div class="kpi-value">${activeWarrantyCount}</div>
+        <div class="kpi-sub">com vencimento futuro</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">Patrimônios do Laboratório (${filtered.length})</h2>
+        <span class="row-actions">
+          <button id="btn-pat-import" class="btn btn-secondary btn-sm" type="button">Importar CSV</button>
+          <button id="btn-pat-export" class="btn btn-secondary btn-sm" type="button">Exportar CSV</button>
+          <button id="btn-new-pat" class="btn btn-primary btn-sm" type="button">+ Novo Patrimônio</button>
+        </span>
+      </div>
+      <div class="card-body">
+        <div class="toolbar">
+          <input id="pat-search" class="input" type="search" placeholder="Buscar nº patrimônio, item, descrição, responsável ou local..." value="${esc(f.search)}" />
+          <select id="pat-resp" class="select">
+            <option value="">Todos Responsáveis</option>
+            ${responsaveis.map((r) => `<option value="${esc(r)}" ${f.responsavel === r ? "selected" : ""}>${esc(r)}</option>`).join("")}
+          </select>
+          <select id="pat-orig" class="select">
+            <option value="">Todas Origens</option>
+            ${origens.map((o) => `<option value="${esc(o)}" ${f.origem === o ? "selected" : ""}>${esc(o)}</option>`).join("")}
+          </select>
+          <select id="pat-local" class="select">
+            <option value="">Todos Locais</option>
+            ${locais.map((l) => `<option value="${esc(l)}" ${f.local === l ? "selected" : ""}>${esc(l)}</option>`).join("")}
+          </select>
+          ${hasActiveFilter ? '<button id="btn-pat-clear" class="btn btn-secondary btn-sm" type="button">Limpar filtros</button>' : ""}
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                ${sortableTh("patrimonios", "numero_patrimonio", "Nº Patrimônio")}
+                ${sortableTh("patrimonios", "nome_item", "Nome do Item")}
+                ${sortableTh("patrimonios", "descricao", "Breve Descrição")}
+                ${sortableTh("patrimonios", "responsavel", "Responsável")}
+                ${sortableTh("patrimonios", "data_incorporacao", "Incorporação")}
+                ${sortableTh("patrimonios", "fim_garantia", "Fim Garantia")}
+                ${sortableTh("patrimonios", "valor_pago", "Valor Pago")}
+                ${sortableTh("patrimonios", "origem", "Origem")}
+                ${sortableTh("patrimonios", "local_item", "Local")}
+                <th>Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${sorted.map((p) => `
+                <tr>
+                  <td class="mono"><strong>${esc(p.numero_patrimonio)}</strong></td>
+                  <td><strong>${esc(p.nome_item)}</strong></td>
+                  <td class="pat-desc-cell">${esc(p.descricao || "—")}</td>
+                  <td>${esc(p.responsavel || "—")}</td>
+                  <td class="mono">${esc(formatDateBR(p.data_incorporacao))}</td>
+                  <td class="mono">${renderWarrantyCell(p.fim_garantia)}</td>
+                  <td class="mono pat-money-cell">${esc(formatMoneyBRL(p.valor_pago))}</td>
+                  <td>${p.origem ? `<span class="badge badge-muted">${esc(p.origem)}</span>` : '<span class="muted">—</span>'}</td>
+                  <td class="pat-local-cell">${esc(p.local_item || "—")}</td>
+                  <td>
+                    <span class="row-actions">
+                      <button class="btn btn-sm btn-secondary js-edit-pat" data-id="${p.id}" type="button">Editar</button>
+                      <button class="btn btn-sm btn-danger js-del-pat" data-id="${p.id}" type="button">Excluir</button>
+                    </span>
+                  </td>
+                </tr>
+              `).join("") || '<tr><td colspan="10" class="muted">Nenhum patrimônio encontrado. Use "+ Novo Patrimônio" ou "Importar CSV" para adicionar registros.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const searchInput = document.getElementById("pat-search");
+  if (hadSearchFocus && searchInput) {
+    searchInput.focus({ preventScroll: true });
+    if (selStart !== null && selEnd !== null) {
+      searchInput.setSelectionRange(selStart, selEnd);
+    }
+  }
+  searchInput.addEventListener("input", (e) => {
+    state.patrimonyFilters.search = e.target.value;
+    renderPatrimonies(true);
+  });
+  document.getElementById("pat-resp").addEventListener("change", (e) => {
+    state.patrimonyFilters.responsavel = e.target.value;
+    renderPatrimonies(true);
+  });
+  document.getElementById("pat-orig").addEventListener("change", (e) => {
+    state.patrimonyFilters.origem = e.target.value;
+    renderPatrimonies(true);
+  });
+  document.getElementById("pat-local").addEventListener("change", (e) => {
+    state.patrimonyFilters.local = e.target.value;
+    renderPatrimonies(true);
+  });
+  const clearBtn = document.getElementById("btn-pat-clear");
+  if (clearBtn) {
+    clearBtn.addEventListener("click", () => {
+      state.patrimonyFilters = { search: "", responsavel: "", origem: "", local: "" };
+      renderPatrimonies(true);
+    });
+  }
+
+  document.getElementById("btn-pat-import").addEventListener("click", openImportPatrimoniesModal);
+  document.getElementById("btn-pat-export").addEventListener("click", async () => {
+    try {
+      await apiDownload("/api/admin/patrimonies/export-csv", null, "Patrimonios_LSEE.csv");
+      showToast("Arquivo CSV de patrimônios gerado!");
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  });
+  document.getElementById("btn-new-pat").addEventListener("click", () => openPatrimonyModal(null, items));
+  el.querySelectorAll(".js-edit-pat").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const p = items.find((x) => x.id === Number(btn.dataset.id));
+      if (p) openPatrimonyModal(p, items);
+    });
+  });
+  el.querySelectorAll(".js-del-pat").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const p = items.find((x) => x.id === Number(btn.dataset.id));
+      const label = p ? `${p.numero_patrimonio} (${p.nome_item})` : "este item";
+      if (!confirm(`Remover o patrimônio ${label}?`)) return;
+      try {
+        await apiFetch(`/api/admin/patrimonies/${btn.dataset.id}`, { method: "DELETE" });
+        showToast("Patrimônio removido.");
+        state.caches.patrimonies = [];
+        renderPatrimonies(false);
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  });
+}
+
+function openPatrimonyModal(pat, allItems) {
+  const isNew = !pat;
+  const p = pat || {};
+  const existingResps = [...new Set((allItems || []).map((x) => (x.responsavel || "").trim()).filter(Boolean))].sort((a, b) => collatorNat.compare(a, b));
+  const existingOrigs = [...new Set([...PATRIMONY_DEFAULT_ORIGINS, ...(allItems || []).map((x) => (x.origem || "").trim()).filter(Boolean)])].sort((a, b) => collatorNat.compare(a, b));
+  const existingLocs = [...new Set([...(allItems || []).map((x) => (x.local_item || "").trim()).filter(Boolean), ...FIXED_LOCATIONS])].sort((a, b) => collatorNat.compare(a, b));
+
+  openModal(isNew ? "Novo Patrimônio" : `Editar Patrimônio ${p.numero_patrimonio}`, `
+    <form id="form-pat">
+      <div class="form-grid">
+        <div class="form-field">
+          <label>Número do Patrimônio *</label>
+          <input class="input mono" name="numero_patrimonio" value="${esc(p.numero_patrimonio || "")}" required placeholder="Ex: 018.065545" />
+        </div>
+        <div class="form-field">
+          <label>Nome do Item *</label>
+          <input class="input" name="nome_item" value="${esc(p.nome_item || "")}" required placeholder="Ex: MICROCOMPUTADOR" />
+        </div>
+        <div class="form-field">
+          <label>Responsável</label>
+          <input class="input" name="responsavel" list="dl-pat-resp" value="${esc(p.responsavel || "")}" placeholder="Ex: Denis Vinicius Coury (88732)" />
+          <datalist id="dl-pat-resp">
+            ${existingResps.map((r) => `<option value="${esc(r)}"></option>`).join("")}
+          </datalist>
+        </div>
+        <div class="form-field">
+          <label>Origem do Item</label>
+          <input class="input" name="origem" list="dl-pat-orig" value="${esc(p.origem || "")}" placeholder="Ex: Compra, Doação, Sispa..." />
+          <datalist id="dl-pat-orig">
+            ${existingOrigs.map((o) => `<option value="${esc(o)}"></option>`).join("")}
+          </datalist>
+        </div>
+        <div class="form-field">
+          <label>Data de Incorporação</label>
+          <input class="input" type="date" name="data_incorporacao" value="${esc(p.data_incorporacao || "")}" />
+        </div>
+        <div class="form-field">
+          <label>Fim da Garantia</label>
+          <input class="input" type="date" name="fim_garantia" value="${esc(p.fim_garantia || "")}" />
+        </div>
+        <div class="form-field">
+          <label>Valor Pago pelo Item (R$)</label>
+          <input class="input mono" name="valor_pago" value="${esc(formatMoneyInputBR(p.valor_pago))}" placeholder="Ex: 1.250,00" />
+        </div>
+        <div class="form-field">
+          <label>Local do Item</label>
+          <input class="input" name="local_item" list="dl-pat-local" value="${esc(p.local_item || "")}" placeholder="Ex: Sala 26453 ou Mestrado" />
+          <datalist id="dl-pat-local">
+            ${existingLocs.map((l) => `<option value="${esc(l)}"></option>`).join("")}
+          </datalist>
+        </div>
+      </div>
+      <div class="form-field" style="margin-top:10px;">
+        <label>Breve Descrição</label>
+        <textarea class="textarea" name="descricao" rows="2" placeholder="Marca, modelo, tipo, configuração ou número de série...">${esc(p.descricao || "")}</textarea>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-secondary" type="button" onclick="closeModal()">Cancelar</button>
+        <button class="btn btn-primary" type="submit">Salvar</button>
+      </div>
+    </form>
+  `, true);
+
+  document.getElementById("form-pat").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const payload = Object.fromEntries(new FormData(e.target).entries());
+    try {
+      if (isNew) {
+        await apiFetch("/api/admin/patrimonies", { method: "POST", body: JSON.stringify(payload) });
+      } else {
+        await apiFetch(`/api/admin/patrimonies/${p.id}`, { method: "PUT", body: JSON.stringify(payload) });
+      }
+      closeModal();
+      showToast("Patrimônio salvo!");
+      state.caches.patrimonies = [];
+      renderPatrimonies(false);
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  });
+}
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || "");
+      resolve(dataUrl.includes(",") ? dataUrl.split(",", 2)[1] : dataUrl);
+    };
+    reader.onerror = () => reject(new Error(`Falha ao ler o arquivo ${file.name}.`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function openImportPatrimoniesModal() {
+  let pendingFiles = [];
+  openModal("Importar Patrimônios (.csv)", `
+    <p class="help-intro" style="margin-top:0;">
+      Selecione um ou mais arquivos <strong>.csv</strong> exportados do Mercúrio/USP (<code>relatorioPatrimonio</code>) ou do próprio painel.
+      Itens com o mesmo <strong>Número do Patrimônio</strong> serão atualizados sem apagar os demais registros.
+    </p>
+    <div class="form-field">
+      <label for="pat-csv-files">Selecionar arquivo(s) .csv</label>
+      <input id="pat-csv-files" class="input" type="file" accept=".csv,text/csv" multiple />
+    </div>
+    <div id="pat-import-preview" style="margin-top:12px;"></div>
+    <div class="form-actions">
+      <button class="btn btn-secondary" type="button" onclick="closeModal()">Cancelar</button>
+      <button id="btn-pat-import-apply" class="btn btn-primary" type="button" disabled>Confirmar Importação</button>
+    </div>
+  `, true);
+
+  document.getElementById("pat-csv-files").addEventListener("change", async (e) => {
+    const fileList = Array.from(e.target.files || []);
+    const previewEl = document.getElementById("pat-import-preview");
+    const applyBtn = document.getElementById("btn-pat-import-apply");
+    applyBtn.disabled = true;
+    pendingFiles = [];
+    if (!fileList.length) {
+      previewEl.innerHTML = "";
+      return;
+    }
+    previewEl.innerHTML = '<p class="muted">Lendo CSV(s) e comparando com o cadastro atual...</p>';
+    try {
+      const encoded = await Promise.all(
+        fileList.map(async (f) => ({
+          filename: f.name,
+          content_base64: await readFileAsBase64(f),
+        }))
+      );
+      const res = await apiFetch("/api/admin/patrimonies/import-csv", {
+        method: "POST",
+        body: JSON.stringify({ files: encoded, preview_only: true }),
+      });
+      pendingFiles = encoded;
+      const filesSummary = (res.files || [])
+        .map((fs) => `<span class="mono">${esc(fs.filename)}</span> (${fs.count})`)
+        .join(" · ");
+      const respSummary = Object.entries(res.counts_by_responsavel || {})
+        .map(([k, v]) => `${esc(k)}: <strong>${v}</strong>`)
+        .join("<br />");
+      const sampleRows = (res.preview || []).slice(0, 6);
+      previewEl.innerHTML = `
+        <div class="notice" style="margin-bottom:10px;">
+          <strong>Arquivos:</strong> ${filesSummary}<br />
+          <strong>Total consolidado:</strong> ${res.total} itens · Novos: <strong>${res.added.length}</strong> · Atualizados: <strong>${res.updated.length}</strong> · Sem alteração: <strong>${res.unchanged}</strong>
+          ${respSummary ? `<div style="margin-top:6px;font-size:0.82rem;">${respSummary}</div>` : ""}
+        </div>
+        ${sampleRows.length ? `
+          <div class="table-wrap" style="max-height:220px;overflow:auto;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Patrimônio</th>
+                  <th>Item</th>
+                  <th>Responsável</th>
+                  <th>Valor</th>
+                  <th>Local</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${sampleRows.map((r) => `
+                  <tr>
+                    <td class="mono">${esc(r.numero_patrimonio)}</td>
+                    <td>${esc(r.nome_item)}</td>
+                    <td>${esc(r.responsavel || "—")}</td>
+                    <td class="mono">${esc(formatMoneyBRL(r.valor_pago))}</td>
+                    <td>${esc(r.local_item || "—")}</td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>
+        ` : ""}
+      `;
+      applyBtn.disabled = false;
+    } catch (err) {
+      pendingFiles = [];
+      previewEl.innerHTML = `<p class="muted" style="color:var(--danger);">${esc(err.message)}</p>`;
+    }
+  });
+
+  document.getElementById("btn-pat-import-apply").addEventListener("click", async () => {
+    if (!pendingFiles.length) return;
+    const applyBtn = document.getElementById("btn-pat-import-apply");
+    applyBtn.disabled = true;
+    try {
+      const res = await apiFetch("/api/admin/patrimonies/import-csv", {
+        method: "POST",
+        body: JSON.stringify({ files: pendingFiles, preview_only: false }),
+      });
+      closeModal();
+      showToast(`Patrimônios importados (${res.added.length} novos, ${res.updated.length} atualizados)!`);
+      state.caches.patrimonies = [];
+      renderPatrimonies(false);
+    } catch (err) {
+      applyBtn.disabled = false;
+      showToast(err.message, true);
+    }
+  });
+}
+
 /* ==================== ETIQUETAS (ADMIN) ==================== */
 function formatCodeForLabel(raw, fallbackPrefix = "PC") {
   const cleaned = String(raw || "").trim();
@@ -5731,8 +6193,16 @@ function openAdminHelpModal() {
       ]
     },
     {
+      tab: "patrimonios",
+      title: "9. Patrimônios",
+      items: [
+        "Inventário patrimonial do laboratório com filtros por responsável, origem e local, soma automática do valor incorporado e controle de garantia.",
+        "Permite importar um ou mais relatórios CSV do Mercúrio/USP com prévia (atualizando sem apagar itens existentes) e exportar em CSV."
+      ]
+    },
+    {
       tab: "etiquetas",
-      title: "9. Etiquetas",
+      title: "10. Etiquetas",
       items: [
         "Monte etiquetas de PCs, Monitores ou Geral na grade Pimaco 3×6 (18 posições/folha).",
         "Visualize a prévia em escala real e exporte em PDF (1:1) ou Word (.docx) pronto para imprimir."
@@ -5740,21 +6210,21 @@ function openAdminHelpModal() {
     },
     {
       tab: "rede",
-      title: "10. Rede (IP / MAC)",
+      title: "11. Rede (IP / MAC)",
       items: [
         "Tabela interna de IPs e MACs com exportação em Excel (.xlsx) para a Roseli e importação com prévia."
       ]
     },
     {
       tab: "solicitacoes",
-      title: "11. Solicitações",
+      title: "12. Solicitações",
       items: [
         "Gere solicitações oficiais EESC/USP com campo de Valor Unitário oculto no documento (cálculo automático do total), rascunho persistente ao recarregar, data por item no histórico, incorporação/criação via pop-up e exportação em PDF ou Word (.docx)."
       ]
     },
     {
       tab: "parametros",
-      title: "12. Parâmetros & Log",
+      title: "13. Parâmetros & Log",
       items: [
         "Configuração principal de pesos do score, regras numéricas, privacidade, cadastro/demissão de ADMs (com pedidos próprios e aprovação de retorno) e auditoria completa.",
         "Use o selo verde no topo e o mini chat à direita para conversar quando outro administrador estiver logado."
