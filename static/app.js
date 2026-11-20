@@ -522,6 +522,40 @@ function closeModal() {
   document.getElementById("modal-body").innerHTML = "";
 }
 
+function openDeleteConfirmModal({
+  title = "Confirmar Exclusão",
+  message = "Tem certeza que deseja excluir este registro?",
+  detailsHtml = "",
+  confirmLabel = "Confirmar Exclusão",
+  onConfirm,
+}) {
+  openModal(title, `
+    <div class="notice notice-error" style="margin-bottom:12px;">
+      <strong>Atenção:</strong> esta ação não pode ser desfeita.
+    </div>
+    <p style="margin:0 0 10px;font-size:0.92rem;">${esc(message)}</p>
+    ${detailsHtml ? `<div style="margin-bottom:14px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface-alt);font-size:0.84rem;">${detailsHtml}</div>` : ""}
+    <div class="form-actions">
+      <button id="btn-confirm-del-cancel" class="btn btn-secondary" type="button">Cancelar</button>
+      <button id="btn-confirm-del-ok" class="btn btn-danger" type="button">${esc(confirmLabel)}</button>
+    </div>
+  `);
+  document.getElementById("btn-confirm-del-cancel").addEventListener("click", closeModal);
+  const okBtn = document.getElementById("btn-confirm-del-ok");
+  okBtn.addEventListener("click", async () => {
+    okBtn.disabled = true;
+    okBtn.textContent = "Excluindo...";
+    try {
+      await onConfirm();
+      closeModal();
+    } catch (err) {
+      okBtn.disabled = false;
+      okBtn.textContent = confirmLabel;
+      showToast(err.message, true);
+    }
+  });
+}
+
 function scoreInfoButton(title = "Explicação simplificada do cálculo do Score") {
   return `<button class="info-icon-btn js-score-info" type="button" title="${esc(title)}" aria-label="${esc(title)}">i</button>`;
 }
@@ -3476,11 +3510,20 @@ async function renderMonitors() {
     });
   });
   el.querySelectorAll(".js-del-mon").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      if (!confirm("Remover este monitor?")) return;
-      await apiFetch(`/api/admin/monitors/${btn.dataset.id}`, { method: "DELETE" });
-      showToast("Monitor removido.");
-      renderMonitors();
+    btn.addEventListener("click", () => {
+      const m = data.items.find((x) => x.id === Number(btn.dataset.id));
+      openDeleteConfirmModal({
+        title: "Excluir Monitor",
+        message: "Deseja realmente excluir este monitor do inventário?",
+        detailsHtml: m
+          ? `<strong>ID:</strong> <span class="mono">${esc(m.id_monitor)}</span> · <strong>Modelo:</strong> ${esc(m.marca_modelo || "—")}`
+          : "",
+        onConfirm: async () => {
+          await apiFetch(`/api/admin/monitors/${btn.dataset.id}`, { method: "DELETE" });
+          showToast("Monitor removido.");
+          renderMonitors();
+        },
+      });
     });
   });
 }
@@ -3781,18 +3824,26 @@ async function renderPatrimonies(useCache = false) {
     });
   });
   el.querySelectorAll(".js-del-pat").forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    btn.addEventListener("click", () => {
       const p = items.find((x) => x.id === Number(btn.dataset.id));
-      const label = p ? `${p.numero_patrimonio} (${p.nome_item})` : "este item";
-      if (!confirm(`Remover o patrimônio ${label}?`)) return;
-      try {
-        await apiFetch(`/api/admin/patrimonies/${btn.dataset.id}`, { method: "DELETE" });
-        showToast("Patrimônio removido.");
-        state.caches.patrimonies = [];
-        renderPatrimonies(false);
-      } catch (err) {
-        showToast(err.message, true);
-      }
+      openDeleteConfirmModal({
+        title: "Excluir Patrimônio",
+        message: "Deseja realmente excluir este patrimônio do cadastro do laboratório?",
+        detailsHtml: p
+          ? `
+            <div><strong>Patrimônio:</strong> <span class="mono">${esc(p.numero_patrimonio)}</span></div>
+            <div><strong>Item:</strong> ${esc(p.nome_item)}</div>
+            <div><strong>Responsável:</strong> ${esc(p.responsavel || "—")}</div>
+            <div><strong>Local:</strong> ${esc(p.local_item || "—")}</div>
+          `
+          : "",
+        onConfirm: async () => {
+          await apiFetch(`/api/admin/patrimonies/${btn.dataset.id}`, { method: "DELETE" });
+          showToast("Patrimônio removido.");
+          state.caches.patrimonies = [];
+          renderPatrimonies(false);
+        },
+      });
     });
   });
 }
@@ -4748,11 +4799,20 @@ async function renderNetwork() {
     });
   });
   el.querySelectorAll(".js-del-net").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      if (!confirm("Remover registro de rede?")) return;
-      await apiFetch(`/api/admin/network/${btn.dataset.id}`, { method: "DELETE" });
-      showToast("Registro removido.");
-      renderNetwork();
+    btn.addEventListener("click", () => {
+      const n = data.items.find((x) => x.id === Number(btn.dataset.id));
+      openDeleteConfirmModal({
+        title: "Excluir Registro de Rede",
+        message: "Deseja realmente excluir este equipamento da tabela de rede?",
+        detailsHtml: n
+          ? `<strong>Equipamento:</strong> ${esc(n.equipamento)} · <strong>IP:</strong> <span class="mono">${esc(n.ip || "—")}</span>`
+          : "",
+        onConfirm: async () => {
+          await apiFetch(`/api/admin/network/${btn.dataset.id}`, { method: "DELETE" });
+          showToast("Registro removido.");
+          renderNetwork();
+        },
+      });
     });
   });
 }
@@ -5577,15 +5637,24 @@ async function renderRequests() {
     });
   });
   el.querySelectorAll(".js-req-hist-del").forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    btn.addEventListener("click", () => {
       const delId = Number(btn.dataset.id);
-      if (!confirm("Remover esta solicitação do histórico?")) return;
-      await apiFetch(`/api/admin/requests/${delId}`, { method: "DELETE" });
-      if (rs.activeId && Number(rs.activeId) === delId) {
-        resetRequestEditorToBlank(rs);
-      }
-      showToast("Solicitação removida.");
-      renderRequests();
+      const h = history.find((x) => x.id === delId);
+      openDeleteConfirmModal({
+        title: "Excluir Solicitação",
+        message: "Deseja realmente excluir esta solicitação do histórico?",
+        detailsHtml: h
+          ? `<strong>Solicitação #${delId}</strong> · ${esc(h.orientador || h.laboratorio || "")}`
+          : "",
+        onConfirm: async () => {
+          await apiFetch(`/api/admin/requests/${delId}`, { method: "DELETE" });
+          if (rs.activeId && Number(rs.activeId) === delId) {
+            resetRequestEditorToBlank(rs);
+          }
+          showToast("Solicitação removida.");
+          renderRequests();
+        },
+      });
     });
   });
 }
