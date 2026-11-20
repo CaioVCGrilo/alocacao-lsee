@@ -3569,7 +3569,7 @@ function renderWarrantyCell(isoDate) {
   const today = new Date().toISOString().slice(0, 10);
   const formatted = esc(formatDateBR(s));
   if (/^\d{4}-\d{2}-\d{2}$/.test(s) && s >= today) {
-    return `${formatted} <span class="badge badge-livre" style="margin-left:4px;">Ativa</span>`;
+    return `<span>${formatted}</span><br /><span class="badge badge-livre pat-warranty-badge">Ativa</span>`;
   }
   return formatted;
 }
@@ -3662,7 +3662,7 @@ async function renderPatrimonies(useCache = false) {
         </span>
       </div>
       <div class="card-body">
-        <div class="toolbar">
+        <div class="toolbar pat-toolbar">
           <input id="pat-search" class="input" type="search" placeholder="Buscar nº patrimônio, item, descrição, responsável ou local..." value="${esc(f.search)}" />
           <select id="pat-resp" class="select">
             <option value="">Todos Responsáveis</option>
@@ -3678,8 +3678,20 @@ async function renderPatrimonies(useCache = false) {
           </select>
           ${hasActiveFilter ? '<button id="btn-pat-clear" class="btn btn-secondary btn-sm" type="button">Limpar filtros</button>' : ""}
         </div>
-        <div class="table-wrap">
-          <table>
+        <div class="table-wrap pat-table-wrap">
+          <table class="patrimonies-table">
+            <colgroup>
+              <col style="width:8.5%;" />
+              <col style="width:13%;" />
+              <col style="width:16.5%;" />
+              <col style="width:12%;" />
+              <col style="width:7.5%;" />
+              <col style="width:7.5%;" />
+              <col style="width:9.5%;" />
+              <col style="width:7.5%;" />
+              <col style="width:11%;" />
+              <col style="width:7%;" />
+            </colgroup>
             <thead>
               <tr>
                 ${sortableTh("patrimonios", "numero_patrimonio", "Nº Patrimônio")}
@@ -3697,17 +3709,17 @@ async function renderPatrimonies(useCache = false) {
             <tbody>
               ${sorted.map((p) => `
                 <tr>
-                  <td class="mono"><strong>${esc(p.numero_patrimonio)}</strong></td>
-                  <td><strong>${esc(p.nome_item)}</strong></td>
-                  <td class="pat-desc-cell">${esc(p.descricao || "—")}</td>
-                  <td>${esc(p.responsavel || "—")}</td>
-                  <td class="mono">${esc(formatDateBR(p.data_incorporacao))}</td>
-                  <td class="mono">${renderWarrantyCell(p.fim_garantia)}</td>
-                  <td class="mono pat-money-cell">${esc(formatMoneyBRL(p.valor_pago))}</td>
-                  <td>${p.origem ? `<span class="badge badge-muted">${esc(p.origem)}</span>` : '<span class="muted">—</span>'}</td>
-                  <td class="pat-local-cell">${esc(p.local_item || "—")}</td>
-                  <td>
-                    <span class="row-actions">
+                  <td class="mono pat-num-cell" data-label="Nº Patrimônio"><strong>${esc(p.numero_patrimonio)}</strong></td>
+                  <td class="pat-item-cell" data-label="Nome do Item"><strong>${esc(p.nome_item)}</strong></td>
+                  <td class="pat-desc-cell" data-label="Breve Descrição">${esc(p.descricao || "—")}</td>
+                  <td class="pat-resp-cell" data-label="Responsável">${esc(p.responsavel || "—")}</td>
+                  <td class="mono pat-date-cell" data-label="Incorporação">${esc(formatDateBR(p.data_incorporacao))}</td>
+                  <td class="mono pat-date-cell" data-label="Fim Garantia">${renderWarrantyCell(p.fim_garantia)}</td>
+                  <td class="mono pat-money-cell" data-label="Valor Pago">${esc(formatMoneyBRL(p.valor_pago))}</td>
+                  <td data-label="Origem">${p.origem ? `<span class="badge badge-muted pat-origin-badge">${esc(p.origem)}</span>` : '<span class="muted">—</span>'}</td>
+                  <td class="pat-local-cell" data-label="Local">${esc(p.local_item || "—")}</td>
+                  <td data-label="Ações">
+                    <span class="pat-actions">
                       <button class="btn btn-sm btn-secondary js-edit-pat" data-id="${p.id}" type="button">Editar</button>
                       <button class="btn btn-sm btn-danger js-del-pat" data-id="${p.id}" type="button">Excluir</button>
                     </span>
