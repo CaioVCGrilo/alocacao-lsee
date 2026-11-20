@@ -3896,7 +3896,8 @@ function openImportPatrimoniesModal() {
   openModal("Importar Patrimônios (.csv)", `
     <p class="help-intro" style="margin-top:0;">
       Selecione um ou mais arquivos <strong>.csv</strong> exportados do Mercúrio/USP (<code>relatorioPatrimonio</code>) ou do próprio painel.
-      Itens com o mesmo <strong>Número do Patrimônio</strong> serão atualizados sem apagar os demais registros.
+      Se o <strong>Número do Patrimônio</strong> já existir no banco, o item será <strong>somente atualizado</strong> (sem duplicar).
+      Caso haja números repetidos no(s) CSV(s), a importação será bloqueada com aviso.
     </p>
     <div class="form-field">
       <label for="pat-csv-files">Selecionar arquivo(s) .csv</label>
@@ -3975,7 +3976,8 @@ function openImportPatrimoniesModal() {
       applyBtn.disabled = false;
     } catch (err) {
       pendingFiles = [];
-      previewEl.innerHTML = `<p class="muted" style="color:var(--danger);">${esc(err.message)}</p>`;
+      previewEl.innerHTML = `<div class="notice notice-error"><strong>Erro na validação do CSV:</strong> ${esc(err.message)}</div>`;
+      showToast(err.message, true);
     }
   });
 

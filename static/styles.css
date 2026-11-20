@@ -606,6 +606,13 @@ tbody tr:hover {
   margin-bottom: 14px;
 }
 
+.notice-error {
+  background: var(--danger-bg);
+  border-color: #fecaca;
+  border-left-color: var(--danger);
+  color: var(--danger);
+}
+
 .toast-area {
   position: fixed;
   right: 18px;

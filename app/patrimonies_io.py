@@ -211,7 +211,11 @@ def _detect_delimiter(first_line: str) -> str:
     return ";"
 
 
-def parse_patrimonies_csv(raw_bytes: bytes) -> List[Dict[str, Any]]:
+def _patrimony_key(numero: Any) -> str:
+    return _clean_text(numero).lower()
+
+
+def parse_patrimonies_csv(raw_bytes: bytes, source_name: str = "") -> List[Dict[str, Any]]:
     """Lê CSV de patrimônios (formato relatório USP/Mercúrio ou exportação do próprio painel)."""
     text = _decode_csv_bytes(raw_bytes)
     lines = [ln for ln in text.splitlines() if ln.strip()]
@@ -234,7 +238,9 @@ def parse_patrimonies_csv(raw_bytes: bytes) -> List[Dict[str, Any]]:
         raise ValueError("Coluna 'Nome' (ou 'nome_item') não encontrada no CSV.")
 
     records: List[Dict[str, Any]] = []
-    for raw_row in reader:
+    seen_lines: Dict[str, List[int]] = {}
+    display_num: Dict[str, str] = {}
+    for line_num, raw_row in enumerate(reader, start=2):
         norm_row: Dict[str, str] = {}
         for orig_k, val in raw_row.items():
             if orig_k is None:
@@ -246,6 +252,10 @@ def parse_patrimonies_csv(raw_bytes: bytes) -> List[Dict[str, Any]]:
         nome_item = next((norm_row[k] for k in name_keys if norm_row.get(k)), "")
         if not numero or not nome_item:
             continue
+
+        key = _patrimony_key(numero)
+        display_num.setdefault(key, numero)
+        seen_lines.setdefault(key, []).append(line_num)
 
         direct_desc = next(
             (
@@ -312,21 +322,59 @@ def parse_patrimonies_csv(raw_bytes: bytes) -> List[Dict[str, Any]]:
             }
         )
 
+    dups = [(display_num[k], lns) for k, lns in seen_lines.items() if len(lns) > 1]
+    if dups:
+        details = "; ".join(
+            f"{num} (linhas {', '.join(str(x) for x in lns)})" for num, lns in dups[:10]
+        )
+        extra = f" e mais {len(dups) - 10}" if len(dups) > 10 else ""
+        src_lbl = f" no arquivo '{source_name}'" if source_name else " no arquivo CSV"
+        raise ValueError(
+            f"Não é permitido haver dois patrimônios com o mesmo número{src_lbl}. "
+            f"Duplicado(s): {details}{extra}. Corrija o arquivo antes de importar."
+        )
+
     if not records:
         raise ValueError("Nenhum registro válido de patrimônio foi encontrado no CSV.")
 
     return records
 
 
-def merge_patrimony_batches(batches: Sequence[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-    """Unifica múltiplos lotes de CSV preservando a ordem e deduplicando por numero_patrimonio."""
-    merged: Dict[str, Dict[str, Any]] = {}
-    for batch in batches:
+def merge_patrimony_batches(
+    batches: Sequence[List[Dict[str, Any]]],
+    source_names: Optional[Sequence[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Unifica múltiplos lotes de CSV e gera erro caso haja números de patrimônio repetidos."""
+    merged: List[Dict[str, Any]] = []
+    seen_sources: Dict[str, List[str]] = {}
+    display_num: Dict[str, str] = {}
+
+    for idx, batch in enumerate(batches):
+        src = (
+            str(source_names[idx]).strip()
+            if source_names and idx < len(source_names) and str(source_names[idx]).strip()
+            else f"arquivo #{idx + 1}"
+        )
         for rec in batch:
-            key = rec["numero_patrimonio"].strip()
-            if key:
-                merged[key] = rec
-    return list(merged.values())
+            num = _clean_text(rec.get("numero_patrimonio"))
+            if not num:
+                continue
+            key = _patrimony_key(num)
+            display_num.setdefault(key, num)
+            seen_sources.setdefault(key, []).append(src)
+            if len(seen_sources[key]) == 1:
+                merged.append(rec)
+
+    dups = [(display_num[k], srcs) for k, srcs in seen_sources.items() if len(srcs) > 1]
+    if dups:
+        details = "; ".join(f"{num} ({', '.join(srcs)})" for num, srcs in dups[:10])
+        extra = f" e mais {len(dups) - 10}" if len(dups) > 10 else ""
+        raise ValueError(
+            "Não é permitido haver dois patrimônios com o mesmo número na importação. "
+            f"Duplicado(s): {details}{extra}. Remova as duplicidades antes de importar."
+        )
+
+    return merged
 
 
 def _records_differ(existing: Dict[str, Any], incoming: Dict[str, Any]) -> bool:
@@ -358,7 +406,25 @@ def diff_and_upsert_patrimonies(
     now_iso: str,
     apply_changes: bool = True,
 ) -> Dict[str, Any]:
-    """Compara registros com o MySQL e, se apply_changes=True, realiza upsert idempotente."""
+    """Compara registros com o MySQL: impede duplicidades, atualiza existentes e insere apenas novos."""
+    seen_in_batch: set[str] = set()
+    dup_in_batch: List[str] = []
+    for rec in records:
+        num = _clean_text(rec.get("numero_patrimonio"))
+        key = _patrimony_key(num)
+        if not key:
+            continue
+        if key in seen_in_batch:
+            if num not in dup_in_batch:
+                dup_in_batch.append(num)
+        else:
+            seen_in_batch.add(key)
+    if dup_in_batch:
+        raise ValueError(
+            "Não é permitido haver dois patrimônios com o mesmo número na importação. "
+            f"Duplicado(s): {', '.join(dup_in_batch[:10])}."
+        )
+
     existing_rows = conn.execute(
         """
         SELECT id, numero_patrimonio, nome_item, descricao, responsavel,
@@ -366,22 +432,32 @@ def diff_and_upsert_patrimonies(
         FROM patrimonies
         """
     ).fetchall()
-    existing_map = {str(r["numero_patrimonio"]).strip(): dict(r) for r in existing_rows}
+    existing_map: Dict[str, Dict[str, Any]] = {}
+    for r in existing_rows:
+        key = _patrimony_key(r["numero_patrimonio"])
+        if key in existing_map:
+            raise ValueError(
+                f"Foram encontrados registros duplicados no banco para o patrimônio '{r['numero_patrimonio']}'. "
+                "Remova a duplicidade antes de importar."
+            )
+        existing_map[key] = dict(r)
 
     added: List[str] = []
     updated: List[str] = []
     unchanged = 0
     counts_by_resp: Dict[str, int] = {}
 
-    to_write: List[Tuple[Any, ...]] = []
+    to_insert: List[Tuple[Any, ...]] = []
+    to_update: List[Tuple[Any, ...]] = []
     for rec in records:
-        num = rec["numero_patrimonio"].strip()
+        num = _clean_text(rec["numero_patrimonio"])
+        key = _patrimony_key(num)
         resp = rec["responsavel"] or "(Sem responsável)"
         counts_by_resp[resp] = counts_by_resp.get(resp, 0) + 1
-        old = existing_map.get(num)
+        old = existing_map.get(key)
         if old is None:
             added.append(num)
-            to_write.append(
+            to_insert.append(
                 (
                     num,
                     rec["nome_item"],
@@ -395,9 +471,9 @@ def diff_and_upsert_patrimonies(
                     now_iso,
                 )
             )
-        elif _records_differ(old, rec):
+        elif _records_differ(old, rec) or _clean_text(old.get("numero_patrimonio")) != num:
             updated.append(num)
-            to_write.append(
+            to_update.append(
                 (
                     num,
                     rec["nome_item"],
@@ -409,31 +485,34 @@ def diff_and_upsert_patrimonies(
                     rec["origem"],
                     rec["local_item"],
                     now_iso,
+                    int(old["id"]),
                 )
             )
         else:
             unchanged += 1
 
-    if apply_changes and to_write:
-        conn.executemany(
-            """
-            INSERT INTO patrimonies(
-                numero_patrimonio, nome_item, descricao, responsavel,
-                data_incorporacao, fim_garantia, valor_pago, origem, local_item, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE
-                nome_item = VALUES(nome_item),
-                descricao = VALUES(descricao),
-                responsavel = VALUES(responsavel),
-                data_incorporacao = VALUES(data_incorporacao),
-                fim_garantia = VALUES(fim_garantia),
-                valor_pago = VALUES(valor_pago),
-                origem = VALUES(origem),
-                local_item = VALUES(local_item),
-                updated_at = VALUES(updated_at)
-            """,
-            to_write,
-        )
+    if apply_changes:
+        if to_insert:
+            conn.executemany(
+                """
+                INSERT INTO patrimonies(
+                    numero_patrimonio, nome_item, descricao, responsavel,
+                    data_incorporacao, fim_garantia, valor_pago, origem, local_item, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                to_insert,
+            )
+        if to_update:
+            conn.executemany(
+                """
+                UPDATE patrimonies
+                SET numero_patrimonio = ?, nome_item = ?, descricao = ?, responsavel = ?,
+                    data_incorporacao = ?, fim_garantia = ?, valor_pago = ?, origem = ?,
+                    local_item = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                to_update,
+            )
 
     return {
         "total": len(records),

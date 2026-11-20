@@ -1808,11 +1808,11 @@ def _handle_patrimonies_import_csv(conn: Any, body: Dict[str, Any]) -> Dict[str,
             raw_bytes = base64.b64decode(b64, validate=True)
         except Exception as exc:
             raise ValueError(f"Conteúdo inválido no arquivo '{fname}'.") from exc
-        parsed = parse_patrimonies_csv(raw_bytes)
+        parsed = parse_patrimonies_csv(raw_bytes, source_name=fname)
         batches.append(parsed)
         file_summaries.append({"filename": fname, "count": len(parsed)})
 
-    merged = merge_patrimony_batches(batches)
+    merged = merge_patrimony_batches(batches, source_names=[fs["filename"] for fs in file_summaries])
     preview_only = bool(body.get("preview_only"))
     res = diff_and_upsert_patrimonies(conn, merged, _now_iso(), apply_changes=not preview_only)
 
@@ -3051,31 +3051,40 @@ class LSEEController:
             if path == "/api/admin/patrimonies":
                 pat = _normalize_patrimony_payload(body)
                 dup = conn.execute(
-                    "SELECT id FROM patrimonies WHERE numero_patrimonio = ?",
+                    "SELECT id FROM patrimonies WHERE LOWER(TRIM(numero_patrimonio)) = LOWER(?)",
                     (pat["numero_patrimonio"],),
                 ).fetchone()
                 if dup:
-                    raise ValueError(f"Já existe um patrimônio cadastrado com o número '{pat['numero_patrimonio']}'.")
-                cur = conn.execute(
-                    """
-                    INSERT INTO patrimonies(
-                        numero_patrimonio, nome_item, descricao, responsavel,
-                        data_incorporacao, fim_garantia, valor_pago, origem, local_item, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        pat["numero_patrimonio"],
-                        pat["nome_item"],
-                        pat["descricao"],
-                        pat["responsavel"],
-                        pat["data_incorporacao"],
-                        pat["fim_garantia"],
-                        pat["valor_pago"],
-                        pat["origem"],
-                        pat["local_item"],
-                        _now_iso(),
-                    ),
-                )
+                    raise ValueError(
+                        f"Não é permitido haver dois patrimônios com o mesmo número: '{pat['numero_patrimonio']}' já está cadastrado."
+                    )
+                try:
+                    cur = conn.execute(
+                        """
+                        INSERT INTO patrimonies(
+                            numero_patrimonio, nome_item, descricao, responsavel,
+                            data_incorporacao, fim_garantia, valor_pago, origem, local_item, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            pat["numero_patrimonio"],
+                            pat["nome_item"],
+                            pat["descricao"],
+                            pat["responsavel"],
+                            pat["data_incorporacao"],
+                            pat["fim_garantia"],
+                            pat["valor_pago"],
+                            pat["origem"],
+                            pat["local_item"],
+                            _now_iso(),
+                        ),
+                    )
+                except Exception as exc:
+                    if "duplicate" in str(exc).lower() or "1062" in str(exc):
+                        raise ValueError(
+                            f"Não é permitido haver dois patrimônios com o mesmo número: '{pat['numero_patrimonio']}' já está cadastrado."
+                        ) from exc
+                    raise
                 _log_audit(conn, "CREATE_PATRIMONY", pat["numero_patrimonio"], pat["nome_item"])
                 self._send_json({"id": cur.lastrowid}, status=HTTPStatus.CREATED)
                 return
@@ -3384,33 +3393,42 @@ class LSEEController:
                     raise LookupError("Patrimônio não encontrado.")
                 pat = _normalize_patrimony_payload(body)
                 dup = conn.execute(
-                    "SELECT id FROM patrimonies WHERE numero_patrimonio = ? AND id != ?",
+                    "SELECT id FROM patrimonies WHERE LOWER(TRIM(numero_patrimonio)) = LOWER(?) AND id != ?",
                     (pat["numero_patrimonio"], pat_pk),
                 ).fetchone()
                 if dup:
-                    raise ValueError(f"Já existe outro patrimônio cadastrado com o número '{pat['numero_patrimonio']}'.")
-                conn.execute(
-                    """
-                    UPDATE patrimonies
-                    SET numero_patrimonio = ?, nome_item = ?, descricao = ?, responsavel = ?,
-                        data_incorporacao = ?, fim_garantia = ?, valor_pago = ?, origem = ?,
-                        local_item = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        pat["numero_patrimonio"],
-                        pat["nome_item"],
-                        pat["descricao"],
-                        pat["responsavel"],
-                        pat["data_incorporacao"],
-                        pat["fim_garantia"],
-                        pat["valor_pago"],
-                        pat["origem"],
-                        pat["local_item"],
-                        _now_iso(),
-                        pat_pk,
-                    ),
-                )
+                    raise ValueError(
+                        f"Não é permitido haver dois patrimônios com o mesmo número: '{pat['numero_patrimonio']}' já pertence a outro registro."
+                    )
+                try:
+                    conn.execute(
+                        """
+                        UPDATE patrimonies
+                        SET numero_patrimonio = ?, nome_item = ?, descricao = ?, responsavel = ?,
+                            data_incorporacao = ?, fim_garantia = ?, valor_pago = ?, origem = ?,
+                            local_item = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            pat["numero_patrimonio"],
+                            pat["nome_item"],
+                            pat["descricao"],
+                            pat["responsavel"],
+                            pat["data_incorporacao"],
+                            pat["fim_garantia"],
+                            pat["valor_pago"],
+                            pat["origem"],
+                            pat["local_item"],
+                            _now_iso(),
+                            pat_pk,
+                        ),
+                    )
+                except Exception as exc:
+                    if "duplicate" in str(exc).lower() or "1062" in str(exc):
+                        raise ValueError(
+                            f"Não é permitido haver dois patrimônios com o mesmo número: '{pat['numero_patrimonio']}' já pertence a outro registro."
+                        ) from exc
+                    raise
                 _log_audit(conn, "UPDATE_PATRIMONY", pat["numero_patrimonio"], pat["nome_item"])
                 self._send_json({"ok": True})
                 return

@@ -108,15 +108,17 @@ def handle_import_patrimonies(csv_paths: list[str]) -> None:
     """Importa um ou mais arquivos CSV de patrimônios diretamente para o MySQL."""
     init_schema()
     batches = []
+    source_names = []
     for raw_path in csv_paths:
         p = Path(raw_path)
         if not p.is_file():
             print(f"Erro: arquivo não encontrado: {p}", file=sys.stderr)
             sys.exit(1)
-        recs = parse_patrimonies_csv(p.read_bytes())
+        recs = parse_patrimonies_csv(p.read_bytes(), source_name=p.name)
         print(f"Lido '{p.name}': {len(recs)} itens")
         batches.append(recs)
-    merged = merge_patrimony_batches(batches)
+        source_names.append(p.name)
+    merged = merge_patrimony_batches(batches, source_names=source_names)
     now_iso = datetime.now(timezone.utc).isoformat()
     with db_session() as conn:
         res = diff_and_upsert_patrimonies(conn, merged, now_iso, apply_changes=True)
